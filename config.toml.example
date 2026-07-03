@@ -1,0 +1,23 @@
+email_provider = "cloudflare_temp_email"
+
+[cloudflare_temp_email]
+api_url = ""
+admin_auth = ""
+domain = ""
+
+[captcha]
+mode = "manual" # manual | yescaptcha
+yescaptcha_client_key = ""
+yescaptcha_api_url = "https://api.yescaptcha.com"
+poll_interval_seconds = 3
+timeout_seconds = 180
+
+[nvidia]
+output_csv = "accounts.csv"
+key_name = "api"
+account_name = "NVIDIA Build"
+key_expiry_date = "2126-05-08T08:00:00Z"
+
+[browser]
+headless = false
+close_delay_seconds = 5

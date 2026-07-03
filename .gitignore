@@ -1,0 +1,25 @@
+# 环境配置
+config.toml
+.env
+
+# 输出文件
+accounts.csv
+nvidia_api_key.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
