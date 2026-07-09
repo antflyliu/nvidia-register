@@ -100,7 +100,7 @@ def _handle_sigint():
     print("\n\nCtrl+C received. Will exit after current account finishes...")
 
 async def run(config: AppConfig, count: int = 1) -> None:
-    email_provider = build_email_provider(config.email_provider, config.cloudflare_temp_email)
+    email_provider = build_email_provider(config)
     captcha_solver = build_captcha_solver(config.captcha)
 
     print("=" * 60)

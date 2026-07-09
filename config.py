@@ -19,6 +19,13 @@ class CloudflareTempEmailConfig:
 
 
 @dataclass(frozen=True)
+class DuckMailConfig:
+    api_url: str
+    domain: str
+    api_key: str | None
+
+
+@dataclass(frozen=True)
 class CaptchaConfig:
     mode: str
     yescaptcha_client_key: str | None
@@ -47,6 +54,7 @@ class BrowserConfig:
 class AppConfig:
     email_provider: str
     cloudflare_temp_email: CloudflareTempEmailConfig
+    duckmail: DuckMailConfig
     captcha: CaptchaConfig
     nvidia: NvidiaConfig
     browser: BrowserConfig
@@ -107,6 +115,11 @@ api_url = ""
 admin_auth = ""
 domain = ""
 
+[duckmail]
+api_url = "https://api.duckmail.sbs"
+domain = "duckmail.sbs"
+api_key = ""
+
 [captcha]
 mode = "manual" # manual | yescaptcha | captcharun
 yescaptcha_client_key = ""
@@ -139,9 +152,35 @@ def load_config() -> AppConfig:
     with CONFIG_FILE.open("rb") as file:
         data = tomllib.load(file)
 
-    email_provider = _get_str(data, "email_provider", "cloudflare_temp_email")
-    if email_provider != "cloudflare_temp_email":
+    email_provider = _get_str(data, "email_provider", "cloudflare_temp_email").lower()
+    if email_provider not in {"cloudflare_temp_email", "duckmail"}:
         raise ValueError(f"Unsupported email_provider: {email_provider}")
+
+    use_cloudflare_temp_email = email_provider == "cloudflare_temp_email"
+    use_duckmail = email_provider == "duckmail"
+
+    cloudflare_api_url = (
+        _require_str(data, "cloudflare_temp_email.api_url")
+        if use_cloudflare_temp_email
+        else _get_str(data, "cloudflare_temp_email.api_url", "")
+    ).rstrip("/")
+    cloudflare_admin_auth = (
+        _require_str(data, "cloudflare_temp_email.admin_auth")
+        if use_cloudflare_temp_email
+        else _get_str(data, "cloudflare_temp_email.admin_auth", "")
+    )
+    cloudflare_domain = (
+        _require_str(data, "cloudflare_temp_email.domain")
+        if use_cloudflare_temp_email
+        else _get_str(data, "cloudflare_temp_email.domain", "")
+    )
+
+    duckmail_domain = (
+        _require_str(data, "duckmail.domain")
+        if use_duckmail
+        else _get_str(data, "duckmail.domain", "")
+    )
+    duckmail_api_key = _get_str(data, "duckmail.api_key", "") or None
 
     captcha_mode = _get_str(data, "captcha.mode", "manual").lower()
     if captcha_mode not in {"manual", "yescaptcha", "captcharun"}:
@@ -156,9 +195,14 @@ def load_config() -> AppConfig:
     return AppConfig(
         email_provider=email_provider,
         cloudflare_temp_email=CloudflareTempEmailConfig(
-            api_url=_require_str(data, "cloudflare_temp_email.api_url").rstrip("/"),
-            admin_auth=_require_str(data, "cloudflare_temp_email.admin_auth"),
-            domain=_require_str(data, "cloudflare_temp_email.domain"),
+            api_url=cloudflare_api_url,
+            admin_auth=cloudflare_admin_auth,
+            domain=cloudflare_domain,
+        ),
+        duckmail=DuckMailConfig(
+            api_url=_get_str(data, "duckmail.api_url", "https://api.duckmail.sbs").rstrip("/"),
+            domain=duckmail_domain,
+            api_key=duckmail_api_key,
         ),
         captcha=CaptchaConfig(
             mode=captcha_mode,
@@ -183,9 +227,16 @@ def load_config() -> AppConfig:
 
 
 def describe_config(config: AppConfig) -> None:
+    if config.email_provider == "cloudflare_temp_email":
+        email_api = config.cloudflare_temp_email.api_url
+        email_domain = config.cloudflare_temp_email.domain
+    else:
+        email_api = config.duckmail.api_url
+        email_domain = config.duckmail.domain
+
     print(f"  EMAIL_PROVIDER: {config.email_provider}")
-    print(f"  EMAIL_API:      {config.cloudflare_temp_email.api_url}")
-    print(f"  EMAIL_DOMAIN:   {config.cloudflare_temp_email.domain}")
+    print(f"  EMAIL_API:      {email_api}")
+    print(f"  EMAIL_DOMAIN:   {email_domain}")
     print(f"  CAPTCHA_MODE:   {config.captcha.mode}")
     print(f"  OUTPUT_CSV:     {config.nvidia.output_csv}")
     print(f"  CONFIG_FILE:    {CONFIG_FILE}")

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import re
+import secrets
 import time
 from dataclasses import dataclass
 from typing import Protocol
 
 import requests
 
-from config import CloudflareTempEmailConfig
+from config import AppConfig, CloudflareTempEmailConfig, DuckMailConfig
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,75 @@ class CloudflareTempEmailProvider:
         return None
 
 
+class DuckMailProvider:
+    def __init__(self, config: DuckMailConfig):
+        self.config = config
+
+    def create_inbox(self, name: str) -> TempEmailInbox:
+        address = f"{name}@{self.config.domain}"
+        password = f"dm_{secrets.token_hex(8)}"
+
+        response = requests.post(
+            f"{self.config.api_url}/accounts",
+            headers=self._account_headers(),
+            json={"address": address, "password": password},
+            timeout=15,
+        )
+        response.raise_for_status()
+
+        token_response = requests.post(
+            f"{self.config.api_url}/token",
+            headers={"Content-Type": "application/json"},
+            json={"address": address, "password": password},
+            timeout=15,
+        )
+        token_response.raise_for_status()
+        data = token_response.json()
+        token = data.get("token", "")
+        if not token:
+            raise RuntimeError(f"DuckMail token acquisition failed: {data}")
+        return TempEmailInbox(address=address, token=token)
+
+    def poll_verification_code(self, inbox: TempEmailInbox, timeout_seconds: int = 180) -> str | None:
+        deadline = time.time() + timeout_seconds
+        headers = {"Authorization": f"Bearer {inbox.token}"}
+        while time.time() < deadline:
+            try:
+                response = requests.get(
+                    f"{self.config.api_url}/messages?page=1",
+                    headers=headers,
+                    timeout=15,
+                )
+                response.raise_for_status()
+                data = response.json()
+                messages = data.get("hydra:member") or []
+                for message in messages:
+                    message_id = message.get("id")
+                    if not message_id:
+                        continue
+                    detail_response = requests.get(
+                        f"{self.config.api_url}/messages/{message_id}",
+                        headers=headers,
+                        timeout=15,
+                    )
+                    detail_response.raise_for_status()
+                    detail = detail_response.json()
+                    body = _duckmail_message_body(detail)
+                    code = _extract_verification_code(body)
+                    if code:
+                        return code
+            except Exception as exc:
+                print(f"  email poll: {exc}", flush=True)
+            time.sleep(2)
+        return None
+
+    def _account_headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.config.api_key:
+            headers["Authorization"] = f"Bearer {self.config.api_key}"
+        return headers
+
+
 def _extract_verification_code(raw_message: str) -> str | None:
     clean = re.sub(r"=\r?\n", "", raw_message)
     index = clean.lower().find("verification code")
@@ -87,7 +157,26 @@ def _extract_verification_code(raw_message: str) -> str | None:
     return None
 
 
-def build_email_provider(provider_name: str, config: CloudflareTempEmailConfig) -> TempEmailProvider:
-    if provider_name == "cloudflare_temp_email":
-        return CloudflareTempEmailProvider(config)
-    raise ValueError(f"Unsupported email provider: {provider_name}")
+def _duckmail_message_body(detail: dict) -> str:
+    parts: list[str] = []
+    text = detail.get("text")
+    if isinstance(text, str) and text.strip():
+        parts.append(text)
+
+    html = detail.get("html") or []
+    if isinstance(html, list):
+        for item in html:
+            if isinstance(item, str) and item.strip():
+                parts.append(item)
+    elif isinstance(html, str) and html.strip():
+        parts.append(html)
+
+    return "\n".join(parts)
+
+
+def build_email_provider(config: AppConfig) -> TempEmailProvider:
+    if config.email_provider == "cloudflare_temp_email":
+        return CloudflareTempEmailProvider(config.cloudflare_temp_email)
+    if config.email_provider == "duckmail":
+        return DuckMailProvider(config.duckmail)
+    raise ValueError(f"Unsupported email provider: {config.email_provider}")

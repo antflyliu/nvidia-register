@@ -1,9 +1,14 @@
-email_provider = "cloudflare_temp_email"
+email_provider = "cloudflare_temp_email" # cloudflare_temp_email | duckmail
 
 [cloudflare_temp_email]
 api_url = ""
 admin_auth = ""
 domain = ""
+
+[duckmail]
+api_url = "https://api.duckmail.sbs"
+domain = "duckmail.sbs"
+api_key = ""
 
 [captcha]
 mode = "manual" # manual | yescaptcha | captcharun
