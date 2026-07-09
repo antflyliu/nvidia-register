@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 from urllib.parse import urlparse, parse_qs
 
 import requests
@@ -98,6 +98,89 @@ class YesCaptchaSolver:
         return None
 
 
+@dataclass(frozen=True)
+class CaptchaRunSolver:
+    token: str
+    api_url: str
+    poll_interval_seconds: int
+    timeout_seconds: int
+
+    async def solve(self, page: Page) -> bool:
+        print("\n[2/4] Solving hCaptcha with CaptchaRun...")
+        site_key = await _get_site_key(page)
+        if not site_key:
+            print("  hCaptcha sitekey not found")
+            return False
+
+        user_agent = await page.evaluate("() => navigator.userAgent")
+        task_id, token = self._create_task(page.url, site_key, user_agent)
+        if task_id and not token:
+            token = self._poll_task_result(task_id)
+        if not token:
+            return False
+
+        await _inject_hcaptcha_token(page, token)
+        for i in range(20):
+            if await _is_register_button_enabled(page):
+                print(f"  hCaptcha solved by CaptchaRun ({i}s)")
+                return True
+            await asyncio.sleep(1)
+        print("  hCaptcha token injected, but #register_button stayed disabled")
+        return False
+
+    def _create_task(self, website_url: str, website_key: str, user_agent: str) -> tuple[str | None, str | None]:
+        response = requests.post(
+            f"{self.api_url}/v2/tasks",
+            headers=self._headers(),
+            json={
+                "captchaType": "HCaptcha",
+                "siteKey": website_key,
+                "siteReferer": _site_referer(website_url),
+                "userAgent": user_agent,
+                "fallbackToActualUA": True,
+            },
+            timeout=30,
+        )
+        data = _response_json(response)
+        if not response.ok:
+            raise RuntimeError(f"CaptchaRun create task failed: {data}")
+        task_id = data.get("taskId")
+        result = data.get("result") or {}
+        token = _extract_hcaptcha_token(result)
+        if not task_id and not token:
+            raise RuntimeError(f"CaptchaRun create task missing taskId/result: {data}")
+        return str(task_id) if task_id else None, token
+
+    def _poll_task_result(self, task_id: str) -> str | None:
+        deadline = time.time() + self.timeout_seconds
+        while time.time() < deadline:
+            response = requests.get(
+                f"{self.api_url}/v2/tasks/{task_id}",
+                headers=self._headers(content_type=False),
+                timeout=30,
+            )
+            data = _response_json(response)
+            if not response.ok:
+                print(f"  CaptchaRun get task result failed: {data}")
+                return None
+
+            status = str(data.get("status", "")).lower()
+            if status == "success":
+                return _extract_hcaptcha_token(data.get("response") or data.get("result") or {})
+            if status == "fail":
+                print(f"  CaptchaRun failed: {data.get('reason') or data}")
+                return None
+            time.sleep(self.poll_interval_seconds)
+        print("  CaptchaRun timeout")
+        return None
+
+    def _headers(self, content_type: bool = True) -> dict[str, str]:
+        headers = {"Authorization": f"Bearer {self.token}"}
+        if content_type:
+            headers["Content-Type"] = "application/json"
+        return headers
+
+
 # ---------------------------------------------------------------------------
 #  sitekey 捕获（render=explicit 模式下 DOM 无 sitekey，只能从网络请求获取）
 # ---------------------------------------------------------------------------
@@ -185,6 +268,26 @@ async def _is_register_button_enabled(page: Page) -> bool:
     return bool(result)
 
 
+def _site_referer(website_url: str) -> str:
+    parsed = urlparse(website_url)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}/"
+    return website_url
+
+
+def _response_json(response: requests.Response) -> dict[str, Any]:
+    try:
+        data = response.json()
+    except ValueError:
+        return {"status_code": response.status_code, "text": response.text}
+    return data if isinstance(data, dict) else {"data": data}
+
+
+def _extract_hcaptcha_token(data: dict[str, Any]) -> str | None:
+    token = data.get("gRecaptchaResponse") or data.get("token")
+    return str(token) if token else None
+
+
 def build_captcha_solver(config: CaptchaConfig) -> CaptchaSolver:
     if config.mode == "manual":
         return ManualCaptchaSolver()
@@ -194,6 +297,15 @@ def build_captcha_solver(config: CaptchaConfig) -> CaptchaSolver:
         return YesCaptchaSolver(
             client_key=config.yescaptcha_client_key,
             api_url=config.yescaptcha_api_url,
+            poll_interval_seconds=config.poll_interval_seconds,
+            timeout_seconds=config.timeout_seconds,
+        )
+    if config.mode == "captcharun":
+        if not config.captcharun_token:
+            raise ValueError("captcharun_token is required")
+        return CaptchaRunSolver(
+            token=config.captcharun_token,
+            api_url=config.captcharun_api_url,
             poll_interval_seconds=config.poll_interval_seconds,
             timeout_seconds=config.timeout_seconds,
         )

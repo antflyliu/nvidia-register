@@ -60,9 +60,6 @@ def _parse_count(argv: list[str]) -> int | None:
 def main_cli() -> None:
     args = sys.argv[1:]
 
-    if args and args[0] in ("--help", "-h"):
-        print((__doc__ or "").strip())
-        return
     if args and args[0] == "--init":
         init_config()
         return

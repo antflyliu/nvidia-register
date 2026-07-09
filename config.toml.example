@@ -6,9 +6,11 @@ admin_auth = ""
 domain = ""
 
 [captcha]
-mode = "manual" # manual | yescaptcha
+mode = "manual" # manual | yescaptcha | captcharun
 yescaptcha_client_key = ""
 yescaptcha_api_url = "https://api.yescaptcha.com"
+captcharun_token = ""
+captcharun_api_url = "https://api.captcha-run.com"
 poll_interval_seconds = 3
 timeout_seconds = 180
 

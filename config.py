@@ -23,6 +23,8 @@ class CaptchaConfig:
     mode: str
     yescaptcha_client_key: str | None
     yescaptcha_api_url: str
+    captcharun_token: str | None
+    captcharun_api_url: str
     poll_interval_seconds: int
     timeout_seconds: int
 
@@ -106,9 +108,11 @@ admin_auth = ""
 domain = ""
 
 [captcha]
-mode = "manual" # manual | yescaptcha
+mode = "manual" # manual | yescaptcha | captcharun
 yescaptcha_client_key = ""
 yescaptcha_api_url = "https://api.yescaptcha.com"
+captcharun_token = ""
+captcharun_api_url = "https://api.captcha-run.com"
 poll_interval_seconds = 3
 timeout_seconds = 180
 
@@ -140,11 +144,14 @@ def load_config() -> AppConfig:
         raise ValueError(f"Unsupported email_provider: {email_provider}")
 
     captcha_mode = _get_str(data, "captcha.mode", "manual").lower()
-    if captcha_mode not in {"manual", "yescaptcha"}:
-        raise ValueError("captcha.mode must be 'manual' or 'yescaptcha'")
+    if captcha_mode not in {"manual", "yescaptcha", "captcharun"}:
+        raise ValueError("captcha.mode must be 'manual', 'yescaptcha' or 'captcharun'")
     yescaptcha_client_key = _get_str(data, "captcha.yescaptcha_client_key", "") or None
     if captcha_mode == "yescaptcha" and not yescaptcha_client_key:
         raise ValueError("captcha.yescaptcha_client_key is required when captcha.mode = 'yescaptcha'")
+    captcharun_token = _get_str(data, "captcha.captcharun_token", "") or None
+    if captcha_mode == "captcharun" and not captcharun_token:
+        raise ValueError("captcha.captcharun_token is required when captcha.mode = 'captcharun'")
 
     return AppConfig(
         email_provider=email_provider,
@@ -157,6 +164,8 @@ def load_config() -> AppConfig:
             mode=captcha_mode,
             yescaptcha_client_key=yescaptcha_client_key,
             yescaptcha_api_url=_get_str(data, "captcha.yescaptcha_api_url", "https://api.yescaptcha.com").rstrip("/"),
+            captcharun_token=captcharun_token,
+            captcharun_api_url=_get_str(data, "captcha.captcharun_api_url", "https://api.captcha-run.com").rstrip("/"),
             poll_interval_seconds=_get_int(data, "captcha.poll_interval_seconds", 3),
             timeout_seconds=_get_int(data, "captcha.timeout_seconds", 180),
         ),

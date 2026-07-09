@@ -6,7 +6,7 @@
 
 - **全自动流程**：创建临时邮箱 → 注册 → 过验证码 → 创建组织 → 建 Key → 记录 CSV，全流程自动化
 - **批量注册**：支持单次注册多个账号，交互式询问或 `-n` 参数直接指定
-- **验证码**：支持 `manual`（手动过 hCaptcha）和 `yescaptcha`（YesCaptcha API 全自动过，成本约0.03元/次）
+- **验证码**：支持 手动过验证(`manual`)和全自动过验证(`yescaptcha`、`captcharun`)两种hCaptcha 处理方式
 - **随机密码**：每次注册自动生成 12 位密码（大小写 + 数字）
 - **自动跳过手机验证**：利用组织名注册跳过手机号要求，并创建长效 API Key
 - **CSV 记录**：每次注册成功立即追加 `email,password,apikey` 到 CSV 文件
@@ -18,7 +18,7 @@
 ├── main.py              # 主入口 + 流程编排
 ├── config.py            # 配置加载（config.toml）
 ├── email_providers.py   # 临时邮箱服务抽象层
-├── captcha.py           # 验证码处理（手动 / YesCaptcha）
+├── captcha.py           # 验证码处理
 ├── passwords.py         # 随机密码生成
 ├── records.py           # CSV 记录写入
 ├── config.toml          # 配置文件
@@ -30,7 +30,7 @@
 - Python 3.11+
 - Chromium 浏览器（Playwright 自动下载）
 - **临时邮箱服务**（当前支持 `cloudflare_temp_email` 自部署）
-- （可选）[YesCaptcha](https://yescaptcha.com/i/57yzUt) 密钥（用于全自动过 hCaptcha）
+- （可选）[YesCaptcha](https://yescaptcha.com/i/57yzUt) / [CaptchaRun](https://captcha-run.com/sso?inviter=ad8fbc2f-9721-430e-87a9-1898fa0177b4) 密钥（用于全自动过 hCaptcha）
 
 ## 安装
 
@@ -57,9 +57,11 @@ admin_auth = "your_admin_key"
 domain = "your-domain.com"
 
 [captcha]
-mode = "manual" # manual | yescaptcha
+mode = "manual" # manual | yescaptcha | captcharun
 yescaptcha_client_key = ""
 yescaptcha_api_url = "https://api.yescaptcha.com"
+captcharun_token = ""
+captcharun_api_url = "https://api.captcha-run.com"
 poll_interval_seconds = 3
 timeout_seconds = 180
 
@@ -80,10 +82,12 @@ close_delay_seconds = 5
 | `cloudflare_temp_email.api_url` | 邮箱服务 API 地址 |
 | `cloudflare_temp_email.admin_auth` | 邮箱服务管理员密钥 |
 | `cloudflare_temp_email.domain` | 邮箱域名 |
-| `captcha.mode` | `manual` 手动过验证，`yescaptcha` 使用 YesCaptcha API |
+| `captcha.mode` | `manual` 手动过验证，`yescaptcha` 使用 YesCaptcha API，`captcharun` 使用 CaptchaRun API |
 | `captcha.yescaptcha_client_key` | YesCaptcha 客户端密钥（mode=yescaptcha 时必填） |
 | `captcha.yescaptcha_api_url` | YesCaptcha API 地址（默认 `https://api.yescaptcha.com`） |
-| `captcha.poll_interval_seconds` | YesCaptcha 结果轮询间隔（秒） |
+| `captcha.captcharun_token` | CaptchaRun Authorization Token（mode=captcharun 时必填） |
+| `captcha.captcharun_api_url` | CaptchaRun API 地址（默认 `https://api.captcha-run.com`） |
+| `captcha.poll_interval_seconds` | 验证码结果轮询间隔（秒） |
 | `captcha.timeout_seconds` | 验证码等待超时时间（秒） |
 | `nvidia.output_csv` | 记录输出 CSV 文件路径 |
 | `nvidia.key_name` | API Key 名称 |
@@ -101,13 +105,7 @@ python main.py
 # 直接指定注册数量（不询问）
 python main.py -n 5
 python main.py --count 3
-
-# 查看帮助
-python main.py --help
 ```
-
-- **manual 模式**：浏览器弹出后手动通过 hCaptcha，其余自动
-- **yescaptcha 模式**：使用 [YesCaptcha](https://yescaptcha.com/i/57yzUt) 平台的验证服务，成本 0.03 元/次，全自动无需人工操作，在配置中填入 `yescaptcha_client_key` 即可
 
 批量注册时每个账号使用独立的浏览器会话，间隔 5 秒。`Ctrl+C` 优雅退出：完成当前正在注册的账号后停止，显示成功/失败汇总。
 
