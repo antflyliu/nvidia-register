@@ -11,11 +11,12 @@ domain = "duckmail.sbs"
 api_key = ""
 
 [captcha]
-mode = "manual" # manual | yescaptcha | captcharun
+mode = "manual" # manual | yescaptcha | captcharun | local
 yescaptcha_client_key = ""
 yescaptcha_api_url = "https://api.yescaptcha.com"
 captcharun_token = ""
 captcharun_api_url = "https://api.captcha-run.com"
+local_solver_url = "http://127.0.0.1:5072" # local 模式：camoufox-turnstile 服务地址
 poll_interval_seconds = 3
 timeout_seconds = 180
 

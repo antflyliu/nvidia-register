@@ -6,7 +6,7 @@
 
 - **全自动流程**：创建临时邮箱 → 注册 → 过验证码 → 创建组织 → 建 Key → 记录 CSV，全流程自动化
 - **批量注册**：支持单次注册多个账号，交互式询问或 `-n` 参数直接指定
-- **验证码**：支持 手动过验证(`manual`)和全自动过验证(`yescaptcha`、`captcharun`)两种hCaptcha 处理方式
+- **验证码**：支持 手动过验证(`manual`)和全自动过验证(`yescaptcha`、`captcharun`、`local`)两种hCaptcha 处理方式
 - **邮箱服务**：支持 `cloudflare_temp_email`（自部署）和 `duckmail`（DuckMail API）
 - **随机密码**：每次注册自动生成 12 位密码（大小写 + 数字）
 - **自动跳过手机验证**：利用组织名注册跳过手机号要求，并创建长效 API Key
@@ -69,11 +69,12 @@ domain = "duckmail.sbs"
 api_key = ""
 
 [captcha]
-mode = "manual" # manual | yescaptcha | captcharun
+mode = "manual" # manual | yescaptcha | captcharun | local
 yescaptcha_client_key = ""
 yescaptcha_api_url = "https://api.yescaptcha.com"
 captcharun_token = ""
 captcharun_api_url = "https://api.captcha-run.com"
+local_solver_url = "http://127.0.0.1:5072" # local 模式：camoufox-turnstile 服务地址
 poll_interval_seconds = 3
 timeout_seconds = 180
 
@@ -98,11 +99,12 @@ close_delay_seconds = 5
 | `duckmail.api_url`                 | DuckMail API 地址（默认 `https://api.duckmail.sbs`）                               |
 | `duckmail.domain`                  | DuckMail 邮箱域名，例如 `duckmail.sbs` 或你的私有域名                                      |
 | `duckmail.api_key`                 | DuckMail 私有域 API Key，使用公共域名时可留空                                              |
-| `captcha.mode`                     | `manual` 手动过验证，`yescaptcha` 使用 YesCaptcha API，`captcharun` 使用 CaptchaRun API |
+| `captcha.mode`                     | `manual` 手动过验证，`yescaptcha` 使用 YesCaptcha API，`captcharun` 使用 CaptchaRun API，`local` 使用本地 camoufox-turnstile 服务 |
 | `captcha.yescaptcha_client_key`    | YesCaptcha 客户端密钥（mode=yescaptcha 时必填）                                        |
 | `captcha.yescaptcha_api_url`       | YesCaptcha API 地址（默认 `https://api.yescaptcha.com`）                           |
 | `captcha.captcharun_token`         | CaptchaRun Authorization Token（mode=captcharun 时必填）                          |
 | `captcha.captcharun_api_url`       | CaptchaRun API 地址（默认 `https://api.captcha-run.com`）                          |
+| `captcha.local_solver_url`         | 本地 camoufox-turnstile 服务地址（mode=local 时使用，默认 `http://127.0.0.1:5072`） |
 | `captcha.poll_interval_seconds`    | 验证码结果轮询间隔（秒）                                                                 |
 | `captcha.timeout_seconds`          | 验证码等待超时时间（秒）                                                                 |
 | `nvidia.output_csv`                | 记录输出 CSV 文件路径                                                                |
@@ -144,6 +146,20 @@ build.nvidia.com (填邮箱) → login.nvgs.nvidia.com (填密码 + hCaptcha)
 → 验证码页 (键盘输入) → 同意页 (提交) → 创建组织 (跳过手机验证)
 → NGC API (建 Key) → CSV 记录
 ```
+
+
+
+## local 模式（对接本地 camoufox-turnstile 服务）
+
+`mode = "local"` 时，hCaptcha 由本地 [camoufox-turnstile](https://github.com/antflyliu/camoufox-turnstile) 服务求解，不依赖外部打码平台。nvidia-register 已走到密码环节（`login.nvgs.nvidia.com`，hCaptcha 已出现），把 `page.url` 作为 `websiteURL` 交给服务；服务开独立 Camoufox 浏览器去该页求解并返回 token，nvidia-register 再注入回页面。
+
+```toml
+[captcha]
+mode = "local"
+local_solver_url = "http://127.0.0.1:5072" # 服务默认端口
+```
+
+前置条件：先启动 camoufox-turnstile 服务（`python -m app.main --config config.json`），并确保其 `solver_hcaptcha` 配置为 `camoufox`（真实求解）而非 `mock`。协议与 YesCaptcha 兼容（`createTask`/`getTaskResult`），服务端不校验 `clientKey`、忽略 `websiteKey`（sitekey 由服务从页面 DOM 推导）。
 
 
 

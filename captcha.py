@@ -188,6 +188,102 @@ class CaptchaRunSolver:
         return headers
 
 
+@dataclass(frozen=True)
+class LocalSolver:
+    """调本地 camoufox-turnstile 服务求解 hCaptcha（YesCaptcha 兼容协议）。
+
+    与 YesCaptchaSolver 走同一套 createTask/getTaskResult 协议，但指向本地
+    camoufox-turnstile 服务（默认 http://127.0.0.1:5072）。服务端不校验
+    clientKey、忽略 websiteKey（sitekey 由服务从页面 DOM 推导），并接受
+    userAgent 用于设置求解浏览器的 UA。nvidia-register 已走到密码环节
+    （login.nvgs.nvidia.com，hCaptcha 已出现），这里把 page.url 作为
+    websiteURL 交给服务，服务开独立 Camoufox 浏览器去该页求解。
+    """
+
+    api_url: str
+    poll_interval_seconds: int
+    timeout_seconds: int
+
+    async def solve(self, page: Page) -> bool:
+        print("\n[2/4] Solving hCaptcha with local camoufox-turnstile...")
+        site_key = await _get_site_key(page)
+        if not site_key:
+            print("  hCaptcha sitekey not found")
+            return False
+
+        user_agent = await page.evaluate("() => navigator.userAgent")
+        # 提取当前页面会话 cookie。NVIDIA 的 hCaptcha 只在携带会话 cookie 时
+        # 才加载（login.nvgs.nvidia.com），服务用这些 cookie 开浏览器才能渲染挑战。
+        cookies = await page.context.cookies()
+        task_id = self._create_task(page.url, site_key, user_agent, cookies)
+        token = self._poll_task_result(task_id)
+        if not token:
+            return False
+
+        await _inject_hcaptcha_token(page, token)
+        for i in range(20):
+            if await _is_register_button_enabled(page):
+                print(f"  hCaptcha solved by local solver ({i}s)")
+                return True
+            await asyncio.sleep(1)
+        print("  hCaptcha token injected, but #register_button stayed disabled")
+        return False
+
+    def _create_task(
+        self,
+        website_url: str,
+        website_key: str,
+        user_agent: str,
+        cookies: list[dict[str, Any]] | None = None,
+    ) -> str:
+        task: dict[str, Any] = {
+            "type": "HCaptchaTaskProxyless",
+            "websiteURL": website_url,
+            "websiteKey": website_key,
+            "userAgent": user_agent,
+        }
+        if cookies:
+            task["cookies"] = cookies
+        response = requests.post(
+            f"{self.api_url}/createTask",
+            json={"task": task},
+            timeout=30,
+        )
+        data = response.json()
+        if data.get("errorId"):
+            raise RuntimeError(f"local solver createTask failed: {data}")
+        task_id = data.get("taskId")
+        if not task_id:
+            raise RuntimeError(f"local solver createTask missing taskId: {data}")
+        return str(task_id)
+
+    def _poll_task_result(self, task_id: str) -> str | None:
+        deadline = time.time() + self.timeout_seconds
+        while time.time() < deadline:
+            try:
+                response = requests.post(
+                    f"{self.api_url}/getTaskResult",
+                    json={"taskId": task_id},
+                    timeout=30,
+                )
+                data = response.json()
+            except requests.RequestException as exc:
+                # 网络抖动不该让整个任务失败，继续轮询到超时为止
+                print(f"  local solver getTaskResult network error: {exc}")
+                time.sleep(self.poll_interval_seconds)
+                continue
+
+            if data.get("errorId"):
+                print(f"  local solver getTaskResult failed: {data}")
+                return None
+            if data.get("status") == "ready":
+                solution = data.get("solution") or {}
+                return solution.get("gRecaptchaResponse") or solution.get("token")
+            time.sleep(self.poll_interval_seconds)
+        print("  local solver timeout")
+        return None
+
+
 # ---------------------------------------------------------------------------
 #  sitekey 捕获（render=explicit 模式下 DOM 无 sitekey，只能从网络请求获取）
 # ---------------------------------------------------------------------------
@@ -335,6 +431,14 @@ def build_captcha_solver(config: CaptchaConfig) -> CaptchaSolver:
         return CaptchaRunSolver(
             token=config.captcharun_token,
             api_url=config.captcharun_api_url,
+            poll_interval_seconds=config.poll_interval_seconds,
+            timeout_seconds=config.timeout_seconds,
+        )
+    if config.mode == "local":
+        if not config.local_solver_url:
+            raise ValueError("local_solver_url is required")
+        return LocalSolver(
+            api_url=config.local_solver_url,
             poll_interval_seconds=config.poll_interval_seconds,
             timeout_seconds=config.timeout_seconds,
         )
