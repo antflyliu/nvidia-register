@@ -227,5 +227,61 @@ class LocalSolverSolveTests(unittest.TestCase):
         self.assertFalse(result)
 
 
+class LocalSolverUnreachableTests(unittest.TestCase):
+    """服务不可达时给出清晰可操作的错误（而非晦涩的 urllib3 连接错误）。"""
+
+    def setUp(self) -> None:
+        reset_captcha_state()
+        self.solver = LocalSolver(
+            api_url="http://127.0.0.1:5072",
+            poll_interval_seconds=0,
+            timeout_seconds=5,
+        )
+
+    def test_create_task_raises_actionable_error_when_service_unreachable(self) -> None:
+        import requests
+
+        with mock.patch(
+            "captcha.requests.post",
+            side_effect=requests.exceptions.ConnectionError(
+                "Max retries exceeded with url: /createTask "
+                "(Caused by NewConnectionError(...): Failed to establish a new connection: "
+                "[WinError 10061] 由于目标计算机积极拒绝，无法连接。)"
+            ),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.solver._create_task(
+                    "https://login.nvgs.nvidia.com/v1/create-account", "sk", "ua"
+                )
+        msg = str(ctx.exception)
+        # 清晰可操作：包含服务地址 + 不可达 + 修复指引
+        self.assertIn("127.0.0.1:5072", msg)
+        self.assertIn("unreachable", msg)
+        self.assertIn("camoufox-turnstile", msg)
+        self.assertIn("solver_hcaptcha", msg)
+
+    def test_create_task_raises_actionable_error_on_timeout(self) -> None:
+        import requests
+
+        with mock.patch(
+            "captcha.requests.post",
+            side_effect=requests.exceptions.ConnectTimeout("timed out"),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.solver._create_task("https://x", "sk", "ua")
+        self.assertIn("unreachable", str(ctx.exception))
+
+    def test_poll_keeps_retrying_on_network_error(self) -> None:
+        # 轮询阶段网络抖动仍应继续重试（不因单次抖动失败），与既有行为一致
+        import requests
+
+        responses = [
+            requests.exceptions.ConnectionError("net down"),
+            _fake_response({"errorId": 0, "status": "ready", "solution": {"token": "P1_ok"}}),
+        ]
+        with mock.patch("captcha.requests.post", side_effect=responses):
+            self.assertEqual(self.solver._poll_task_result("t1"), "P1_ok")
+
+
 if __name__ == "__main__":
     unittest.main()

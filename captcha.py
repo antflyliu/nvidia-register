@@ -215,10 +215,17 @@ class LocalSolver:
         # 提取当前页面会话 cookie。NVIDIA 的 hCaptcha 只在携带会话 cookie 时
         # 才加载（login.nvgs.nvidia.com），服务用这些 cookie 开浏览器才能渲染挑战。
         cookies = await page.context.cookies()
+        # 本地化日志：每次 createTask 都打印一条，带上 websiteURL 片段，便于
+        # 与服务端 `hcaptcha solve.start cr=N` 日志对账「一个账号的发起了几次求解」。
+        print(f"  [local-solver] createTask websiteURL={page.url[:80]} "
+              f"sitekey={site_key[:12]}... cookies={len(cookies)}")
         task_id = self._create_task(page.url, site_key, user_agent, cookies)
+        print(f"  [local-solver] taskId={task_id} 开始轮询")
         token = self._poll_task_result(task_id)
         if not token:
+            print("  [local-solver] 轮询结束，未拿到 token")
             return False
+        print(f"  [local-solver] 拿到 token len={len(str(token))}，注入页面")
 
         await _inject_hcaptcha_token(page, token)
         for i in range(20):
@@ -228,6 +235,20 @@ class LocalSolver:
             await asyncio.sleep(1)
         print("  hCaptcha token injected, but #register_button stayed disabled")
         return False
+
+    def _unreachable(self, path: str, exc: Exception) -> RuntimeError:
+        """构造服务不可达时的清晰可操作错误。
+
+        本地 camoufox-turnstile 服务是自托管控制面，连接失败几乎总是
+        「服务没启动 / 端口不对 / 求解器配置成 mock」这类可修复问题。
+        把晦涩的 urllib3 `Max retries exceeded` 包装成带服务地址和修复
+        指引的 RuntimeError，避免用户对着连接错误无从下手。
+        """
+        return RuntimeError(
+            f"local solver service unreachable at {self.api_url}{path}: {exc}\n"
+            "请确认 camoufox-turnstile 服务已启动并监听该端口，且其 "
+            "solver_hcaptcha 配置为 camoufox（真实求解）而非 mock。"
+        )
 
     def _create_task(
         self,
@@ -244,12 +265,15 @@ class LocalSolver:
         }
         if cookies:
             task["cookies"] = cookies
-        response = requests.post(
-            f"{self.api_url}/createTask",
-            json={"task": task},
-            timeout=30,
-        )
-        data = response.json()
+        try:
+            response = requests.post(
+                f"{self.api_url}/createTask",
+                json={"task": task},
+                timeout=30,
+            )
+            data = response.json()
+        except requests.RequestException as exc:
+            raise self._unreachable("/createTask", exc) from exc
         if data.get("errorId"):
             raise RuntimeError(f"local solver createTask failed: {data}")
         task_id = data.get("taskId")
@@ -268,7 +292,8 @@ class LocalSolver:
                 )
                 data = response.json()
             except requests.RequestException as exc:
-                # 网络抖动不该让整个任务失败，继续轮询到超时为止
+                # 网络抖动不该让整个任务失败，继续轮询到超时为止；但首次
+                # 连接失败（服务不可达）给出清晰提示，避免反复打印晦涩错误。
                 print(f"  local solver getTaskResult network error: {exc}")
                 time.sleep(self.poll_interval_seconds)
                 continue
