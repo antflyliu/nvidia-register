@@ -26,6 +26,19 @@ class DuckMailConfig:
 
 
 @dataclass(frozen=True)
+class OutlookEmailConfig:
+    api_url: str
+    api_key: str
+    source_group_id: int | None
+    success_group_id: int | None
+    failed_group_id: int | None
+    skip_disabled: bool
+    from_contains: str
+    subject_contains: str
+    folder: str
+
+
+@dataclass(frozen=True)
 class CaptchaConfig:
     mode: str
     yescaptcha_client_key: str | None
@@ -56,6 +69,7 @@ class AppConfig:
     email_provider: str
     cloudflare_temp_email: CloudflareTempEmailConfig
     duckmail: DuckMailConfig
+    outlook_email: OutlookEmailConfig
     captcha: CaptchaConfig
     nvidia: NvidiaConfig
     browser: BrowserConfig
@@ -90,6 +104,23 @@ def _get_int(data: dict[str, Any], path: str, default: int) -> int:
     return current if isinstance(current, int) else default
 
 
+def _get_optional_int(data: dict[str, Any], path: str) -> int | None:
+    current: Any = data
+    for part in path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    if current is None or current == "":
+        return None
+    if isinstance(current, bool):
+        return None
+    if isinstance(current, int):
+        return current
+    if isinstance(current, str) and current.strip().lstrip("-").isdigit():
+        return int(current.strip())
+    return None
+
+
 def _get_bool(data: dict[str, Any], path: str, default: bool) -> bool:
     current: Any = data
     for part in path.split("."):
@@ -120,6 +151,17 @@ domain = ""
 api_url = "https://api.duckmail.sbs"
 domain = "duckmail.sbs"
 api_key = ""
+
+[outlook_email]
+api_url = "http://127.0.0.1:5000"
+api_key = ""
+source_group_id = 1
+success_group_id = 2
+failed_group_id = 3
+skip_disabled = false
+from_contains = ""
+subject_contains = ""
+folder = "all"
 
 [captcha]
 mode = "manual" # manual | yescaptcha | captcharun
@@ -154,11 +196,12 @@ def load_config() -> AppConfig:
         data = tomllib.load(file)
 
     email_provider = _get_str(data, "email_provider", "cloudflare_temp_email").lower()
-    if email_provider not in {"cloudflare_temp_email", "duckmail"}:
+    if email_provider not in {"cloudflare_temp_email", "duckmail", "outlook_email"}:
         raise ValueError(f"Unsupported email_provider: {email_provider}")
 
     use_cloudflare_temp_email = email_provider == "cloudflare_temp_email"
     use_duckmail = email_provider == "duckmail"
+    use_outlook_email = email_provider == "outlook_email"
 
     cloudflare_api_url = (
         _require_str(data, "cloudflare_temp_email.api_url")
@@ -183,6 +226,39 @@ def load_config() -> AppConfig:
     )
     duckmail_api_key = _get_str(data, "duckmail.api_key", "") or None
 
+    outlook_api_url = (
+        _require_str(data, "outlook_email.api_url")
+        if use_outlook_email
+        else _get_str(data, "outlook_email.api_url", "http://127.0.0.1:5000")
+    ).rstrip("/")
+    outlook_api_key = (
+        _require_str(data, "outlook_email.api_key")
+        if use_outlook_email
+        else _get_str(data, "outlook_email.api_key", "")
+    )
+    outlook_folder = _get_str(data, "outlook_email.folder", "all").lower() or "all"
+    if outlook_folder not in {"inbox", "junkemail", "deleteditems", "all"}:
+        raise ValueError("outlook_email.folder must be inbox, junkemail, deleteditems or all")
+
+    source_group_id = _get_optional_int(data, "outlook_email.source_group_id")
+    if source_group_id is None:
+        source_group_id = _get_optional_int(data, "outlook_email.group_id")
+    success_group_id = _get_optional_int(data, "outlook_email.success_group_id")
+    if success_group_id is None:
+        success_group_id = _get_optional_int(data, "outlook_email.used_group_id")
+    failed_group_id = _get_optional_int(data, "outlook_email.failed_group_id")
+    if use_outlook_email:
+        if source_group_id is None:
+            raise ValueError("outlook_email.source_group_id is required when email_provider = 'outlook_email'")
+        if success_group_id is None:
+            raise ValueError("outlook_email.success_group_id is required when email_provider = 'outlook_email'")
+        if failed_group_id is None:
+            raise ValueError("outlook_email.failed_group_id is required when email_provider = 'outlook_email'")
+        if len({source_group_id, success_group_id, failed_group_id}) != 3:
+            raise ValueError(
+                "outlook_email.source_group_id / success_group_id / failed_group_id must be three different groups"
+            )
+
     captcha_mode = _get_str(data, "captcha.mode", "manual").lower()
     if captcha_mode not in {"manual", "yescaptcha", "captcharun", "local"}:
         raise ValueError("captcha.mode must be 'manual', 'yescaptcha', 'captcharun' or 'local'")
@@ -205,6 +281,17 @@ def load_config() -> AppConfig:
             api_url=_get_str(data, "duckmail.api_url", "https://api.duckmail.sbs").rstrip("/"),
             domain=duckmail_domain,
             api_key=duckmail_api_key,
+        ),
+        outlook_email=OutlookEmailConfig(
+            api_url=outlook_api_url,
+            api_key=outlook_api_key,
+            source_group_id=source_group_id,
+            success_group_id=success_group_id,
+            failed_group_id=failed_group_id,
+            skip_disabled=_get_bool(data, "outlook_email.skip_disabled", False),
+            from_contains=_get_str(data, "outlook_email.from_contains", ""),
+            subject_contains=_get_str(data, "outlook_email.subject_contains", ""),
+            folder=outlook_folder,
         ),
         captcha=CaptchaConfig(
             mode=captcha_mode,
@@ -233,6 +320,13 @@ def describe_config(config: AppConfig) -> None:
     if config.email_provider == "cloudflare_temp_email":
         email_api = config.cloudflare_temp_email.api_url
         email_domain = config.cloudflare_temp_email.domain
+    elif config.email_provider == "outlook_email":
+        email_api = config.outlook_email.api_url
+        email_domain = (
+            f"A={config.outlook_email.source_group_id} "
+            f"B={config.outlook_email.success_group_id} "
+            f"C={config.outlook_email.failed_group_id}"
+        )
     else:
         email_api = config.duckmail.api_url
         email_domain = config.duckmail.domain

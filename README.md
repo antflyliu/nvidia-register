@@ -7,7 +7,7 @@
 - **全自动流程**：创建临时邮箱 → 注册 → 过验证码 → 创建组织 → 建 Key → 记录 CSV，全流程自动化
 - **批量注册**：支持单次注册多个账号，交互式询问或 `-n` 参数直接指定
 - **验证码**：支持 手动过验证(`manual`)和全自动过验证(`yescaptcha`、`captcharun`、`local`)两种hCaptcha 处理方式
-- **邮箱服务**：支持 `cloudflare_temp_email`（自部署）和 `duckmail`（DuckMail API）
+- **邮箱服务**：支持 `cloudflare_temp_email`（自部署）、`duckmail`（DuckMail API）和 `outlook_email`（OutlookEmail 账号池）
 - **随机密码**：每次注册自动生成 12 位密码（大小写 + 数字）
 - **自动跳过手机验证**：利用组织名注册跳过手机号要求，并创建长效 API Key
 - **CSV 记录**：每次注册成功立即追加 `email,password,apikey` 到 CSV 文件
@@ -32,7 +32,7 @@
 
 - Python 3.11+
 - Chromium 浏览器（Playwright 自动下载）
-- **临时邮箱服务**（当前支持 `cloudflare_temp_email` 自部署 和 `duckmail`）
+- **邮箱服务**（当前支持 `cloudflare_temp_email` 自部署、`duckmail` 和 `outlook_email`）
 - （可选）[YesCaptcha](https://yescaptcha.com/i/57yzUt)（推荐） / [CaptchaRun](https://captcha-run.com/sso?inviter=ad8fbc2f-9721-430e-87a9-1898fa0177b4) 密钥（用于全自动过 hCaptcha）
 
 
@@ -68,6 +68,13 @@ api_url = "https://api.duckmail.sbs"
 domain = "duckmail.sbs"
 api_key = ""
 
+[outlook_email]
+api_url = "http://127.0.0.1:5000"
+api_key = ""
+source_group_id = 1
+success_group_id = 2
+failed_group_id = 3
+
 [captcha]
 mode = "manual" # manual | yescaptcha | captcharun | local
 yescaptcha_client_key = ""
@@ -92,13 +99,18 @@ close_delay_seconds = 5
 
 | 配置项                                | 说明                                                                           |
 | ---------------------------------- | ---------------------------------------------------------------------------- |
-| `email_provider`                   | 临时邮箱服务类型（支持 `cloudflare_temp_email` / `duckmail`）                            |
+| `email_provider`                   | 邮箱服务类型（支持 `cloudflare_temp_email` / `duckmail` / `outlook_email`）               |
 | `cloudflare_temp_email.api_url`    | 邮箱服务 API 地址                                                                  |
 | `cloudflare_temp_email.admin_auth` | 邮箱服务管理员密钥                                                                    |
 | `cloudflare_temp_email.domain`     | 邮箱域名                                                                         |
 | `duckmail.api_url`                 | DuckMail API 地址（默认 `https://api.duckmail.sbs`）                               |
 | `duckmail.domain`                  | DuckMail 邮箱域名，例如 `duckmail.sbs` 或你的私有域名                                      |
 | `duckmail.api_key`                 | DuckMail 私有域 API Key，使用公共域名时可留空                                              |
+| `outlook_email.api_url`            | OutlookEmail 对外 API 地址（默认 `http://127.0.0.1:5000`）                               |
+| `outlook_email.api_key`            | OutlookEmail 对外 API Key                                                                |
+| `outlook_email.source_group_id`    | 分组 A：未使用 Outlook 邮箱池                                                            |
+| `outlook_email.success_group_id`   | 分组 B：NVIDIA 注册成功后移入                                                            |
+| `outlook_email.failed_group_id`    | 分组 C：NVIDIA 注册失败后移入                                                            |
 | `captcha.mode`                     | `manual` 手动过验证，`yescaptcha` 使用 YesCaptcha API，`captcharun` 使用 CaptchaRun API，`local` 使用本地 camoufox-turnstile 服务 |
 | `captcha.yescaptcha_client_key`    | YesCaptcha 客户端密钥（mode=yescaptcha 时必填）                                        |
 | `captcha.yescaptcha_api_url`       | YesCaptcha API 地址（默认 `https://api.yescaptcha.com`）                           |
@@ -147,8 +159,6 @@ build.nvidia.com (填邮箱) → login.nvgs.nvidia.com (填密码 + hCaptcha)
 → NGC API (建 Key) → CSV 记录
 ```
 
-
-
 ## local 模式（对接本地 camoufox-turnstile 服务）
 
 `mode = "local"` 时，hCaptcha 由本地 [camoufox-turnstile](https://github.com/antflyliu/camoufox-turnstile) 服务求解，不依赖外部打码平台。nvidia-register 已走到密码环节（`login.nvgs.nvidia.com`，hCaptcha 已出现），把 `page.url` 作为 `websiteURL` 交给服务；服务开独立 Camoufox 浏览器去该页求解并返回 token，nvidia-register 再注入回页面。
@@ -165,7 +175,7 @@ local_solver_url = "http://127.0.0.1:5072" # 服务默认端口
 
 ## 扩展邮箱服务
 
-当前已支持 `cloudflare_temp_email` 和 `duckmail`，后续仍可通过实现 `TempEmailProvider` 协议扩展：
+当前已支持 `cloudflare_temp_email`、`duckmail` 和 `outlook_email`。`outlook_email` 从分组 A 取号，成功移到分组 B，失败移到分组 C。后续仍可通过实现 `TempEmailProvider` 协议扩展：
 
 ```python
 class TempEmailProvider(Protocol):
