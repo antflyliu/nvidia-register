@@ -13,6 +13,9 @@ logs/
 diag-*.png
 diag-*.txt
 
+# prototype 可视化对照图（判图答案标注，本地人眼对照用，不入版本）
+prototype/out/
+
 # Python
 __pycache__/
 *.pyc
