@@ -438,6 +438,132 @@ def _extract_hcaptcha_token(data: dict[str, Any]) -> str | None:
     return str(token) if token else None
 
 
+# ---------------------------------------------------------------------------
+#  ClassifySolver — 客户端取图 → 自建 /v1/classify 判图 → 客户端回填
+#  与 LocalSolver.solve 完全相同的接口
+#  drag/bbox 或服务端 ERROR_UNSUPPORTED_CHALLENGE 时自动 fallback local
+# ---------------------------------------------------------------------------
+
+
+class ClassifySolver:
+    """hCaptcha classify 求解器。
+
+    流程：客户端浏览器内取图 → POST /v1/classify → 回填点击提交。
+    检测到 drag/bbox 或服务端返回 unsupported 时自动 fallback 到 LocalSolver。
+    """
+
+    def __init__(
+        self,
+        api_url: str,
+        poll_interval_seconds: int = 1,
+        timeout_seconds: int = 30,
+        local_solver_url: str | None = None,
+    ):
+        self.api_url = api_url.rstrip("/")
+        self.poll_interval_seconds = poll_interval_seconds
+        self.timeout_seconds = timeout_seconds
+        self.local_solver_url = local_solver_url or api_url
+
+    async def solve(self, page: Page) -> bool:
+        """与 LocalSolver.solve 完全相同的接口。"""
+        print("\n[2/4] Solving hCaptcha with classify solver...")
+
+        # 1) 取图 + 问句（客户端取图能力，阶段 2 实现）
+        challenge = await self._capture_challenge(page)
+        if challenge is None:
+            print("  no challenge frame surfaced")
+            return False
+
+        # 2) drag/bbox 直接 fallback（stage1 不支持）
+        if challenge.get("captcha_type") in ("drag", "bbox"):
+            print(f"  {challenge['captcha_type']} unsupported by classify, fallback local")
+            return await self._fallback_local(page)
+
+        # 3) 调自建判图服务
+        answer = self._classify(challenge)
+        if answer is None:
+            print("  classify returned unsupported or failed, fallback local")
+            return await self._fallback_local(page)
+
+        # 4) 客户端回填点击 + 提交（阶段 3 实现）
+        ok = await self._apply_answer(page, challenge, answer)
+        if not ok:
+            print("  apply_answer failed, fallback local")
+            return await self._fallback_local(page)
+
+        # 5) 等 token 注入，检查按钮使能
+        token = await self._wait_hcaptcha_token(page)
+        if not token:
+            return False
+
+        await self._inject_hcaptcha_token(page, token)
+
+        for i in range(20):
+            if await _is_register_button_enabled(page):
+                print(f"  hCaptcha solved by classify solver ({i}s)")
+                return True
+            await asyncio.sleep(1)
+
+        print("  hCaptcha token injected, but #register_button stayed disabled")
+        return False
+
+    async def _capture_challenge(self, page: Page) -> dict[str, Any] | None:
+        """客户端取图 + 问句（TODO: 阶段 2 实现）"""
+        # TODO: 实现进 frame=challenge + task-image.screenshot() + question/anchor 提取
+        # 目前直接返回模拟数据，便于后续开发
+        return {
+            "captcha_type": "grid",
+            "queries": ["base64-placeholder-for-grid-image"],
+            "question": "Click the 5th image",
+        }
+
+    def _classify(self, challenge: dict[str, Any]) -> list | None:
+        """POST /v1/classify；返回 answer 或 None（服务端拒/失败）。"""
+        try:
+            resp = requests.post(
+                f"{self.api_url}/v1/classify",
+                json={
+                    "captchaType": "HCaptchaClassification",
+                    "captcha_type": challenge.get("captcha_type"),
+                    "question": challenge.get("question", ""),
+                    "queries": challenge.get("queries", []),
+                },
+                timeout=self.timeout_seconds,
+            )
+            data = _response_json(resp)
+            if not data.get("solved"):
+                return None
+            return data.get("answer")
+        except Exception as exc:
+            print(f"  classify request failed: {exc}")
+            return None
+
+    async def _apply_answer(self, page: Page, challenge: dict[str, Any], answer: list | list[list]) -> bool:
+        """客户端回填点击提交（TODO: 阶段 3 实现）"""
+        # TODO: 按 captcha_type 做坐标映射 + page.mouse.click + button-submit
+        print(f"  [TODO] Applying answer: {answer} (stub)")
+        return True
+
+    async def _wait_hcaptcha_token(self, page: Page) -> str | None:
+        """等待 /getcaptcha/ 返回 pass，提取 token。（TODO: 阶段 3 实现）"""
+        print("  [TODO] Waiting for hCaptcha pass and token")
+        return "stub-token-placeholder"
+
+    async def _inject_hcaptcha_token(self, page: Page, token: str):
+        """注入 token 到 textarea[name="h-captcha-response"]（已有实现，直接复用）。"""
+        await _inject_hcaptcha_token(page, token)
+
+    async def _fallback_local(self, page: Page) -> bool:
+        """委托 LocalSolver 真机兜底（零重复逻辑）。"""
+        print("  falling back to local solver (real browser)")
+        local = LocalSolver(
+            api_url=self.local_solver_url,
+            poll_interval_seconds=self.poll_interval_seconds,
+            timeout_seconds=self.timeout_seconds,
+        )
+        return await local.solve(page)
+
+
 def build_captcha_solver(config: CaptchaConfig) -> CaptchaSolver:
     if config.mode == "manual":
         return ManualCaptchaSolver()
@@ -466,5 +592,14 @@ def build_captcha_solver(config: CaptchaConfig) -> CaptchaSolver:
             api_url=config.local_solver_url,
             poll_interval_seconds=config.poll_interval_seconds,
             timeout_seconds=config.timeout_seconds,
+        )
+    if config.mode == "classify":
+        if not config.classify_solver_url:
+            raise ValueError("classify_solver_url is required")
+        return ClassifySolver(
+            api_url=config.classify_solver_url,
+            poll_interval_seconds=config.poll_interval_seconds,
+            timeout_seconds=config.timeout_seconds,
+            local_solver_url=config.local_solver_url or config.classify_solver_url,
         )
     raise ValueError(f"Unsupported captcha mode: {config.mode}")

@@ -46,6 +46,7 @@ class CaptchaConfig:
     captcharun_token: str | None
     captcharun_api_url: str
     local_solver_url: str
+    classify_solver_url: str
     poll_interval_seconds: int
     timeout_seconds: int
 
@@ -269,6 +270,7 @@ def load_config() -> AppConfig:
     if captcha_mode == "captcharun" and not captcharun_token:
         raise ValueError("captcha.captcharun_token is required when captcha.mode = 'captcharun'")
     local_solver_url = _get_str(data, "captcha.local_solver_url", "http://127.0.0.1:5072").rstrip("/")
+    classify_solver_url = _get_str(data, "captcha.classify_solver_url", "http://127.0.0.1:5072").rstrip("/")
 
     return AppConfig(
         email_provider=email_provider,
@@ -300,6 +302,7 @@ def load_config() -> AppConfig:
             captcharun_token=captcharun_token,
             captcharun_api_url=_get_str(data, "captcha.captcharun_api_url", "https://api.captcha-run.com").rstrip("/"),
             local_solver_url=local_solver_url,
+            classify_solver_url=classify_solver_url,
             poll_interval_seconds=_get_int(data, "captcha.poll_interval_seconds", 3),
             timeout_seconds=_get_int(data, "captcha.timeout_seconds", 180),
         ),
