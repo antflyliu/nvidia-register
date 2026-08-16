@@ -47,6 +47,7 @@ class CaptchaConfig:
     captcharun_api_url: str
     local_solver_url: str
     classify_solver_url: str
+    classify_humanize: bool
     poll_interval_seconds: int
     timeout_seconds: int
 
@@ -271,6 +272,9 @@ def load_config() -> AppConfig:
         raise ValueError("captcha.captcharun_token is required when captcha.mode = 'captcharun'")
     local_solver_url = _get_str(data, "captcha.local_solver_url", "http://127.0.0.1:5072").rstrip("/")
     classify_solver_url = _get_str(data, "captcha.classify_solver_url", "http://127.0.0.1:5072").rstrip("/")
+    # classify 模式 checkbox 点击是否加贝塞尔真人轨迹。普通 chromium 需 True；
+    # camoufox(humanize=True) 浏览器内核已真人化，设 False 更快。默认 True。
+    classify_humanize = _get_bool(data, "captcha.classify_humanize", True)
 
     return AppConfig(
         email_provider=email_provider,
@@ -303,6 +307,7 @@ def load_config() -> AppConfig:
             captcharun_api_url=_get_str(data, "captcha.captcharun_api_url", "https://api.captcha-run.com").rstrip("/"),
             local_solver_url=local_solver_url,
             classify_solver_url=classify_solver_url,
+            classify_humanize=classify_humanize,
             poll_interval_seconds=_get_int(data, "captcha.poll_interval_seconds", 3),
             timeout_seconds=_get_int(data, "captcha.timeout_seconds", 180),
         ),

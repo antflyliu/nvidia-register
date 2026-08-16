@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
+import math
+import random
 import time
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -444,6 +448,71 @@ def _extract_hcaptcha_token(data: dict[str, Any]) -> str | None:
 #  drag/bbox 或服务端 ERROR_UNSUPPORTED_CHALLENGE 时自动 fallback local
 # ---------------------------------------------------------------------------
 
+# hCaptcha 挑战框 DOM 选择器（真机诊断确认，与 prototype 一致）。
+# 所有类型 challenge iframe src 相同（newassets.hcaptcha.com + frame=challenge），
+# 只有 challenge.js 子路径不同——是区分类型的唯一可靠信号。
+_CHALLENGE_FRAME_HINT = "newassets.hcaptcha.com"
+_CHALLENGE_VIEW_SEL = ".challenge-view"
+_TASK_IMAGE_SEL = ".task-image"
+# 问句在 .challenge-prompt（纯挑战问句），非 .challenge-header（含报告文字拼接）。
+_QUESTION_SEL = ".challenge-prompt"
+# challenge.js 子路径 → captcha_type（实测三种）。
+_CHALLENGE_JS_TYPE_MAP = {
+    "image_label_binary": "grid",
+    "image_label_area_select": "point",
+    "image_drag_drop": "drag",
+}
+# checkbox iframe XPath（对齐 hcaptcha-challenger 库 click_checkbox）。
+_CHECKBOX_IFRAME_XPATH = (
+    "//iframe[starts-with(@src,'https://newassets.hcaptcha.com/captcha/v1/') "
+    "and contains(@src, 'frame=checkbox')]"
+)
+# 提交按钮（对齐库 challenger.py:641）。
+_SUBMIT_BUTTON_XPATH = "//div[@class='button-submit button']"
+
+# 等待 iframe/渲染/图片的超时（秒）。
+_WAIT_IFRAME_SEC = 30
+_WAIT_RENDER_SEC = 15
+_WAIT_IMAGE_SEC = 15
+
+
+def _bezier_trajectory(start: tuple[float, float], end: tuple[float, float],
+                       steps: int = 25) -> list[tuple[float, float]]:
+    """二次贝塞尔曲线鼠标轨迹（对齐库 _generate_bezier_trajectory）。
+
+    普通 chromium 缺 camoufox 的 humanize，page.mouse.move 直线一步到位是机器人
+    特征，hCaptcha 会识别并拒给挑战（display-error）。用贝塞尔曲线 + 随机控制点
+    模拟真人鼠标弧线轨迹。
+    """
+    points = []
+    distance = math.sqrt((end[0] - start[0]) ** 2 + (end[1] - start[1]) ** 2)
+    offset_factor = min(0.3, max(0.1, distance / 1000))
+    mid_x = (start[0] + end[0]) / 2
+    mid_y = (start[1] + end[1]) / 2
+    control_x = mid_x + random.uniform(-1, 1) * distance * offset_factor
+    control_y = mid_y + random.uniform(-1, 1) * distance * offset_factor
+    for i in range(steps + 1):
+        t = i / steps
+        x = (1 - t) ** 2 * start[0] + 2 * (1 - t) * t * control_x + t ** 2 * end[0]
+        y = (1 - t) ** 2 * start[1] + 2 * (1 - t) * t * control_y + t ** 2 * end[1]
+        points.append((x, y))
+    return points
+
+
+def _dynamic_delays(steps: int, base_delay: float = 8) -> list[float]:
+    """动态延迟（对齐库 _generate_dynamic_delays）：两端慢中间快，加 ±10% 随机。"""
+    delays = []
+    for i in range(steps + 1):
+        progress = i / steps
+        if progress < 0.5:
+            factor = 2 * progress * progress
+        else:
+            progress -= 1
+            factor = 1 - (-2 * progress * progress)
+        delay_factor = 1.5 - 0.9 * factor
+        delays.append(base_delay * delay_factor * random.uniform(0.9, 1.1))
+    return delays
+
 
 class ClassifySolver:
     """hCaptcha classify 求解器。
@@ -458,25 +527,37 @@ class ClassifySolver:
         poll_interval_seconds: int = 1,
         timeout_seconds: int = 30,
         local_solver_url: str | None = None,
+        humanize: bool = True,
     ):
         self.api_url = api_url.rstrip("/")
         self.poll_interval_seconds = poll_interval_seconds
         self.timeout_seconds = timeout_seconds
         self.local_solver_url = local_solver_url or api_url
+        # checkbox 点击是否加贝塞尔真人轨迹。普通 chromium 需 True（绕过 hCaptcha
+        # 自动化检测）；camoufox(humanize=True) 浏览器内核已真人化，设 False 直接
+        # 点击更快（camoufox 文档建议关自定义贝塞尔）。
+        self._humanize = bool(humanize)
+        # 网络监听捕获的 challenge.js URL（点 checkbox 后 hCaptcha 才加载）。
+        self._captured_challenge_js: str | None = None
 
     async def solve(self, page: Page) -> bool:
         """与 LocalSolver.solve 完全相同的接口。"""
         print("\n[2/4] Solving hCaptcha with classify solver...")
 
-        # 1) 取图 + 问句（客户端取图能力，阶段 2 实现）
+        # 0) 点 checkbox 弹出挑战框（ClassifySolver 独有；现有 solver 不点，靠打码平台云端点）
+        if not await self._click_checkbox(page):
+            print("  failed to trigger challenge via checkbox, fallback local")
+            return await self._fallback_local(page)
+
+        # 1) 取图 + 问句
         challenge = await self._capture_challenge(page)
         if challenge is None:
             print("  no challenge frame surfaced")
             return False
 
-        # 2) drag/bbox 直接 fallback（stage1 不支持）
-        if challenge.get("captcha_type") in ("drag", "bbox"):
-            print(f"  {challenge['captcha_type']} unsupported by classify, fallback local")
+        # 2) bbox 直接 fallback（classify 不支持 bbox；drag 已支持）
+        if challenge.get("captcha_type") == "bbox":
+            print("  bbox unsupported by classify, fallback local")
             return await self._fallback_local(page)
 
         # 3) 调自建判图服务
@@ -485,7 +566,9 @@ class ClassifySolver:
             print("  classify returned unsupported or failed, fallback local")
             return await self._fallback_local(page)
 
-        # 4) 客户端回填点击 + 提交（阶段 3 实现）
+        print(f"  [classify] answer = {answer}")
+
+        # 4) 客户端回填点击 + 提交（阶段 3 Step 2 实现，当前 stub 不真点）
         ok = await self._apply_answer(page, challenge, answer)
         if not ok:
             print("  apply_answer failed, fallback local")
@@ -507,14 +590,366 @@ class ClassifySolver:
         print("  hCaptcha token injected, but #register_button stayed disabled")
         return False
 
+    async def _click_checkbox(self, page: Page) -> bool:
+        """点 hCaptcha checkbox 弹出挑战框（ClassifySolver 独有，现有 solver 不需要）。
+
+        对齐 hcaptcha-challenger 库 click_checkbox：frame_locator(checkbox iframe)
+        .locator('#checkbox') + bounding_box() + page.mouse.click(视口坐标中心)。
+        库用 page.mouse.click（视口坐标）而非 element.click()（DOM 点击），可绕过
+        hCaptcha 的 div.check pointer-events 拦截（prototype 真机验证 element.click
+        不可靠：Frame was detached / subtree intercepts pointer events）。
+
+        同时挂 page.on('response') 捕获 challenge.js URL——点 checkbox 后 hCaptcha
+        才加载 challenge.js，其子路径是区分挑战类型的唯一可靠信号。
+
+        返回 True 若挑战 iframe 在 _WAIT_IFRAME_SEC 内出现；否则 False。
+        """
+        # 挂网络监听捕获 challenge.js（点 checkbox 后才加载）+ hCaptcha 验证 token
+        self._captured_challenge_js = None
+        self._captured_token: str | None = None
+
+        async def _on_response(resp):
+            url = resp.url or ""
+            # challenge.js（类型识别）
+            if not self._captured_challenge_js:
+                if "/challenge/" in url and url.endswith("/challenge.js"):
+                    self._captured_challenge_js = url
+            # hCaptcha 验证通过 → /getcaptcha/ 响应 {pass:true, generated_pass_UUID:...}
+            # 对齐库 challenger.py:723-734。token 只取首个 pass 响应。
+            if not self._captured_token and "/getcaptcha/" in url:
+                try:
+                    ctype = resp.headers.get("content-type", "")
+                    if "json" in ctype:
+                        data = await resp.json()
+                        if data.get("pass"):
+                            tok = data.get("generated_pass_UUID") or ""
+                            if tok:
+                                self._captured_token = tok
+                except Exception:
+                    pass  # 非 JSON 或解析失败，忽略（库同样吞异常）
+
+        page.on("response", _on_response)
+
+        # 点 checkbox：库的方式，视口坐标 mouse.click
+        try:
+            checkbox_frame = page.frame_locator(_CHECKBOX_IFRAME_XPATH)
+            checkbox_el = checkbox_frame.locator("//div[@id='checkbox']")
+            # frame_locator.locator 的 bounding_box 需通过 page 级 locator
+            # 用 page.locator 组合 XPath 定位 iframe 内 checkbox
+            await self._click_checkbox_center(page)
+        except Exception as exc:
+            print(f"  [classify] click checkbox failed: {exc}")
+            return False
+
+        # 等挑战 iframe 出现
+        fr = await self._find_challenge_frame(page)
+        if fr is None:
+            print("  [classify] challenge iframe not found after clicking checkbox")
+            return False
+        print("  [classify] challenge iframe detected")
+        return True
+
+    async def _click_checkbox_center(self, page: Page) -> None:
+        """真人化点击 checkbox 中心（贝塞尔轨迹 + 动态延迟，绕过 hCaptcha 自动化检测）。
+
+        先等 checkbox iframe 出现，取其内 #checkbox 的 bounding_box，用 _human_click
+        点中心。普通 chromium 缺 camoufox humanize，裸 page.mouse.move/click 是直线
+        瞬移机器人特征，hCaptcha 识别后弹挑战框但 display-error 不给挑战内容。
+        """
+        deadline = time.time() + _WAIT_IFRAME_SEC
+        while time.time() < deadline:
+            iframe_el = page.locator(_CHECKBOX_IFRAME_XPATH).first
+            try:
+                if await iframe_el.count() == 0:
+                    await asyncio.sleep(0.3)
+                    continue
+            except Exception:
+                await asyncio.sleep(0.3)
+                continue
+            checkbox = page.frame_locator(_CHECKBOX_IFRAME_XPATH).locator("//div[@id='checkbox']")
+            try:
+                box = await checkbox.bounding_box()
+            except Exception:
+                await asyncio.sleep(0.3)
+                continue
+            if box is None:
+                await asyncio.sleep(0.3)
+                continue
+            cx = box["x"] + box["width"] / 2
+            cy = box["y"] + box["height"] / 2
+            # 点击前随机停顿（真人点前会犹豫），避免点完 widget 就点的机器时序
+            await asyncio.sleep(random.uniform(0.3, 0.8))
+            await self._human_click(page, cx, cy, bezier=self._humanize)
+            print(f"  [classify] human-clicked checkbox at ({cx:.0f},{cy:.0f}) "
+                  f"(bezier={self._humanize})")
+            return
+        raise RuntimeError("checkbox iframe not found within %ds" % _WAIT_IFRAME_SEC)
+
+    async def _human_click(self, page: Page, x: float, y: float, *,
+                           bezier: bool = True) -> None:
+        """点击目标，可选贝塞尔轨迹真人化。
+
+        bezier=True（默认，普通 chromium 用）：贝塞尔轨迹移动 + 动态延迟 + 点击，
+        模拟真人鼠标。普通 chromium 缺 camoufox humanize，裸 page.mouse.click 是
+        机器人特征，hCaptcha 会拒。
+        bezier=False（camoufox 用）：直接 page.mouse.click 一步到位。camoufox 的
+        humanize=True 已在浏览器内核层处理真人化（isTrusted=true + 真实轨迹），
+        再加贝塞尔是多余且拖慢（camoufox 文档建议关自定义贝塞尔）。
+        """
+        if not bezier:
+            await page.mouse.move(x, y)
+            await page.mouse.click(x, y, delay=random.randint(80, 200))
+            return
+        # 贝塞尔轨迹：随机起点 → 曲线移动 → 动态延迟 → 点击
+        start_x = x + random.uniform(-150, 150)
+        start_y = y + random.uniform(-150, 150)
+        steps = random.randint(20, 30)
+        traj = _bezier_trajectory((start_x, start_y), (x, y), steps)
+        delays = _dynamic_delays(steps, base_delay=8)
+        await page.mouse.move(start_x, start_y)
+        for (px, py), d in zip(traj, delays):
+            await page.mouse.move(px, py)
+            await asyncio.sleep(d / 1000)
+        # 到位后短暂停顿再点（真人移到位会看一眼再点）
+        await asyncio.sleep(random.uniform(0.1, 0.25))
+        await page.mouse.click(x, y, delay=random.randint(80, 200))
+
+    async def _human_drag(self, page: Page, sx: float, sy: float,
+                          ex: float, ey: float, *, bezier: bool = True) -> None:
+        """拖拽（drag 挑战回填），对齐库 _perform_drag_drop（challenger.py:518-574）。
+
+        bezier=True（普通 chromium 用）：移到起点 → 按下前犹豫 → down → 贝塞尔轨迹
+        移动（末段加噪声）→ 精确收尾 → 释放前停顿 → up。连续移动必须贝塞尔，直线瞬移
+        是机器人特征，hCaptcha 会拒。
+        bezier=False（camoufox 用）：move→down→move→up 一步到位，camoufox humanize
+        已在内核层处理真人化。
+        """
+        if not bezier:
+            await page.mouse.move(sx, sy)
+            await page.mouse.down()
+            await page.mouse.move(ex, ey)
+            await page.mouse.up()
+            return
+        # 移到起点
+        await page.mouse.move(sx, sy)
+        # 按下前犹豫（真人反应时间）
+        await asyncio.sleep(random.uniform(0.05, 0.15))
+        await page.mouse.down()
+        # 贝塞尔轨迹拖拽（复用 _bezier_trajectory + _dynamic_delays）
+        steps = 25
+        traj = _bezier_trajectory((sx, sy), (ex, ey), steps)
+        delays = _dynamic_delays(steps, base_delay=15)
+        for i, ((cx, cy), d) in enumerate(zip(traj, delays)):
+            # 末段加微调噪声（对齐库：最后 30% 加噪声，最后 10% 更大）
+            if i > steps * 0.7:
+                noise = 0.5 if i > steps * 0.9 else 0.2
+                cx += random.uniform(-noise, noise)
+                cy += random.uniform(-noise, noise)
+            await page.mouse.move(cx, cy)
+            await asyncio.sleep(d / 1000)
+        # 精确收尾到终点
+        await page.mouse.move(ex, ey)
+        # 释放前停顿（真人精度调整）
+        await asyncio.sleep(random.uniform(0.05, 0.1))
+        await page.mouse.up()
+        # 拖拽间隔
+        await asyncio.sleep(random.uniform(0.08, 0.12))
+
+    async def _find_challenge_frame(self, page: Page):
+        """扁平扫描 page.frames，找含 newassets.hcaptcha.com 且 frame=challenge 的 frame。"""
+        deadline = time.time() + _WAIT_IFRAME_SEC
+        while time.time() < deadline:
+            for fr in page.frames:
+                src = fr.url or ""
+                if _CHALLENGE_FRAME_HINT in src and "frame=challenge" in src:
+                    return fr
+            await asyncio.sleep(0.5)
+        return None
+
+    async def _dump_hcaptcha_iframes(self, page: Page) -> None:
+        """打印所有 hcaptcha iframe src，诊断 challenge iframe 是否存在/消失。"""
+        try:
+            iframes = await page.evaluate(
+                """() => [...document.querySelectorAll('iframe')]
+                    .map(f => f.src).filter(s => s && s.includes('hcaptcha'))"""
+            )
+            print("  [classify] 现有 hcaptcha iframe src:")
+            for s in iframes or []:
+                print(f"      {s[:160]}")
+            if not iframes:
+                print("      (无——checkbox 点击后挑战框可能未弹出或已消失)")
+        except Exception as exc:
+            print(f"  [classify] iframe 诊断失败: {exc}")
+
+    async def _wait_images_loaded(self, fr, detected_type: str) -> None:
+        """等挑战图片加载（grid 等task-image img，point 等canvas尺寸>0+settle）。
+
+        真机诊断：point 挑战图渲染在 <canvas>（无 <img>），故先查 img 无则查 canvas。
+        """
+        deadline = time.time() + _WAIT_IMAGE_SEC
+        if detected_type == "grid":
+            while time.time() < deadline:
+                done = await fr.evaluate(
+                    """() => {
+                        const tis = [...document.querySelectorAll('.task-image')];
+                        if (tis.length < 9) return {ready: false};
+                        const imgs = tis.map(t => t.querySelector('img')).filter(Boolean);
+                        if (imgs.length < 9) return {ready: false};
+                        return {ready: imgs.every(i => i.complete && i.naturalWidth > 0)};
+                    }"""
+                )
+                if done and done.get("ready"):
+                    return
+                await asyncio.sleep(0.3)
+            return
+        # point/drag/unknown：先 img 无则 canvas
+        found_canvas = False
+        while time.time() < deadline:
+            state = await fr.evaluate(
+                """() => {
+                    const cv = document.querySelector('.challenge-view');
+                    if (!cv) return {kind: 'none'};
+                    const imgs = [...cv.querySelectorAll('img')];
+                    if (imgs.length) return {kind: 'img', ready: imgs.every(i => i.complete && i.naturalWidth > 0)};
+                    const canvases = [...cv.querySelectorAll('canvas')];
+                    if (canvases.length) return {kind: 'canvas', ready: canvases[0].width > 0 && canvases[0].height > 0};
+                    return {kind: 'none'};
+                }"""
+            )
+            kind = (state or {}).get("kind")
+            if kind == "img" and state.get("ready"):
+                return
+            if kind == "canvas" and state.get("ready"):
+                found_canvas = True
+                break
+            await asyncio.sleep(0.3)
+        if found_canvas:
+            await asyncio.sleep(1.0)  # canvas 同步绘制，1s settle
+            return
+
     async def _capture_challenge(self, page: Page) -> dict[str, Any] | None:
-        """客户端取图 + 问句（TODO: 阶段 2 实现）"""
-        # TODO: 实现进 frame=challenge + task-image.screenshot() + question/anchor 提取
-        # 目前直接返回模拟数据，便于后续开发
+        """客户端取图 + 问句 + 自适应判类型（prototype 验证逻辑搬入）。
+
+        时序（关键）：等 challenge.js → 判类型 → 等 challenge-view → 等图片 → 截图。
+        返回 {captcha_type, queries:[png_b64], question, detected_type, challenge_js_type,
+              grid_w, grid_h, n_task_images} 或 None。
+        """
+        fr = await self._find_challenge_frame(page)
+        if fr is None:
+            print("  [classify] challenge iframe not found")
+            await self._dump_hcaptcha_iframes(page)
+            return None
+
+        # 1) 等 challenge.js 捕获（最长 10s）
+        if not self._captured_challenge_js:
+            print("  [classify] waiting challenge.js ...")
+            js_deadline = time.time() + 10
+            while time.time() < js_deadline and not self._captured_challenge_js:
+                await asyncio.sleep(0.3)
+            print(f"  [classify] challenge.js = {self._captured_challenge_js!r}")
+
+        # 2) 判类型
+        detected_type = "unknown"
+        challenge_js_type = None
+        if self._captured_challenge_js:
+            tail = self._captured_challenge_js.split("/challenge/")[-1]
+            challenge_js_type = tail.rsplit("/challenge.js", 1)[0]
+            detected_type = _CHALLENGE_JS_TYPE_MAP.get(challenge_js_type, "unknown")
+        # DOM 兜底
+        if challenge_js_type is None:
+            try:
+                js_in_dom = await fr.evaluate(
+                    """() => {
+                        const s = document.querySelector('script[src*="/challenge/"][src$="/challenge.js"]');
+                        return s ? s.src : null;
+                    }"""
+                )
+                if js_in_dom:
+                    tail = js_in_dom.split("/challenge/")[-1]
+                    challenge_js_type = tail.rsplit("/challenge.js", 1)[0]
+                    detected_type = _CHALLENGE_JS_TYPE_MAP.get(challenge_js_type, "unknown")
+            except Exception:
+                pass
+
+        # 3) 等 challenge-view 渲染
+        cv = None
+        cv_deadline = time.time() + _WAIT_RENDER_SEC
+        while time.time() < cv_deadline:
+            cv = await fr.query_selector(_CHALLENGE_VIEW_SEL)
+            if cv is not None:
+                break
+            await asyncio.sleep(0.3)
+        if cv is None:
+            print("  [classify] challenge-view not rendered")
+            # 诊断：打印 challenge iframe 内 DOM 概要 + error-text，定位是
+            # hCaptcha 报错（自动化检测）还是选择器不对。
+            try:
+                dom = await fr.evaluate(
+                    """() => {
+                        const body = document.body;
+                        if (!body) return {err: 'no body'};
+                        const errEl = document.querySelector('.error-text, .display-error');
+                        return {
+                            url: location.href.slice(0, 120),
+                            readyState: document.readyState,
+                            bodyClasses: body.className,
+                            childTags: [...body.children].map(c => c.tagName + '.' + (c.className||'').slice(0,40)),
+                            hasChallengeView: !!document.querySelector('.challenge-view'),
+                            hasError: !!document.querySelector('.display-error, .error-text'),
+                            errorText: errEl ? (errEl.textContent||'').trim().slice(0,200) : null,
+                            allDivs: [...document.querySelectorAll('div')].slice(0,15).map(d => (d.className||'').slice(0,40)).filter(Boolean),
+                        };
+                    }"""
+                )
+                print(f"  [classify] challenge iframe DOM: {json.dumps(dom, ensure_ascii=False)[:500]}")
+            except Exception as exc:
+                print(f"  [classify] DOM 诊断失败: {exc}")
+            return None
+
+        # 4) 等图片加载
+        await self._wait_images_loaded(fr, detected_type)
+        await asyncio.sleep(0.5)  # settle
+
+        # 5) task-image 数量 + unknown 兜底
+        n_task_images = await fr.eval_on_selector_all(_TASK_IMAGE_SEL, "els => els.length") or 0
+        if detected_type == "unknown":
+            if n_task_images == 9:
+                detected_type = "grid"
+            elif n_task_images == 0:
+                detected_type = "drag"
+
+        # 6) 取问句
+        question_el = await fr.query_selector(_QUESTION_SEL)
+        question = (await question_el.text_content()) if question_el else ""
+        question = (question or "").strip()
+
+        # 7) 截 challenge-view 整块
+        png = await cv.screenshot()
+        # bbox 用 Locator 方式取（与 _click_checkbox 一致，返回主框架视口坐标，
+        # 比 ElementHandle.bounding_box() 在 iframe 内更可靠）。drag/point 回填
+        # 路 B：服务端返回截图内像素坐标，客户端 +bbox_x/+bbox_y 映射到视口。
+        cv_locator = fr.locator(_CHALLENGE_VIEW_SEL)
+        box = await cv_locator.bounding_box()
+        if box:
+            w, h = int(box["width"]), int(box["height"])
+            bbox_x, bbox_y = box["x"], box["y"]
+        else:
+            w, h = -1, -1
+            bbox_x, bbox_y = 0.0, 0.0
+
+        print(f"  [classify] type={detected_type} js={challenge_js_type!r} "
+              f"q={question!r} size={w}x{h} task_images={n_task_images}")
         return {
-            "captcha_type": "grid",
-            "queries": ["base64-placeholder-for-grid-image"],
-            "question": "Click the 5th image",
+            "captcha_type": detected_type,
+            "queries": [base64.b64encode(png).decode("ascii")],
+            "question": question,
+            "detected_type": detected_type,
+            "challenge_js_type": challenge_js_type,
+            "grid_w": w,
+            "grid_h": h,
+            "n_task_images": n_task_images,
+            "bbox_x": bbox_x,
+            "bbox_y": bbox_y,
         }
 
     def _classify(self, challenge: dict[str, Any]) -> list | None:
@@ -538,16 +973,127 @@ class ClassifySolver:
             print(f"  classify request failed: {exc}")
             return None
 
-    async def _apply_answer(self, page: Page, challenge: dict[str, Any], answer: list | list[list]) -> bool:
-        """客户端回填点击提交（TODO: 阶段 3 实现）"""
-        # TODO: 按 captcha_type 做坐标映射 + page.mouse.click + button-submit
-        print(f"  [TODO] Applying answer: {answer} (stub)")
-        return True
+    async def _apply_answer(self, page: Page, challenge: dict[str, Any],
+                            answer: list | list[list]) -> bool:
+        """客户端回填点击/拖拽 + 点提交按钮。
+
+        按 captcha_type 把服务端答案映射到视口坐标，用 _human_click/_human_drag
+        执行，最后点 .button-submit 提交。坐标映射（路 B）：服务端返回 challenge-view
+        截图内像素坐标，客户端 +bbox_x/+bbox_y 映射到视口。
+        """
+        ctype = challenge.get("captcha_type")
+        bbox_x = float(challenge.get("bbox_x", 0.0))
+        bbox_y = float(challenge.get("bbox_y", 0.0))
+        w = challenge.get("grid_w") or 0
+        h = challenge.get("grid_h") or 0
+
+        try:
+            if ctype == "grid":
+                await self._apply_grid(page, answer, bbox_x, bbox_y, w, h)
+            elif ctype == "point":
+                await self._apply_point(page, answer, bbox_x, bbox_y)
+            elif ctype == "drag":
+                await self._apply_drag(page, answer, bbox_x, bbox_y)
+            else:
+                print(f"  [classify] unknown captcha_type for apply: {ctype}")
+                return False
+        except Exception as exc:
+            print(f"  [classify] apply answer failed: {exc}")
+            return False
+
+        # 点提交按钮（对齐库 challenger.py:642-643）
+        return await self._click_submit(page)
+
+    async def _apply_grid(self, page: Page, answer: list, bbox_x: float,
+                          bbox_y: float, w: int, h: int) -> None:
+        """grid：1 起数序号 → 九宫格每格中心视口坐标 → 逐格 click。
+
+        answer=["2","6","9"]，序号 n 的格：col=(n-1)%3, row=(n-1)//3，
+        中心视口坐标 = bbox_x + (col+0.5)*cell_w, bbox_y + (row+0.5)*cell_h。
+        """
+        if w <= 0 or h <= 0:
+            raise RuntimeError("grid size unknown (w=%s h=%s)" % (w, h))
+        cell_w, cell_h = w / 3, h / 3
+        for n in answer:
+            try:
+                idx = int(n) - 1
+            except (ValueError, TypeError):
+                continue
+            if not 0 <= idx <= 8:
+                continue
+            row, col = idx // 3, idx % 3
+            cx = bbox_x + (col + 0.5) * cell_w
+            cy = bbox_y + (row + 0.5) * cell_h
+            print(f"  [classify] grid click #{n} at ({cx:.0f},{cy:.0f})")
+            await self._human_click(page, cx, cy, bezier=self._humanize)
+            await asyncio.sleep(random.uniform(0.3, 0.6))
+
+    async def _apply_point(self, page: Page, answer: list, bbox_x: float,
+                            bbox_y: float) -> None:
+        """point：[[x,y]] 原图像素 → +bbox 映射视口 → click。"""
+        for pt in answer:
+            try:
+                px, py = int(pt[0]), int(pt[1])
+            except (ValueError, TypeError, IndexError):
+                continue
+            vx, vy = bbox_x + px, bbox_y + py
+            print(f"  [classify] point click at ({vx:.0f},{vy:.0f})")
+            await self._human_click(page, vx, vy, bezier=self._humanize)
+            await asyncio.sleep(random.uniform(0.3, 0.6))
+
+    async def _apply_drag(self, page: Page, answer: list, bbox_x: float,
+                          bbox_y: float) -> None:
+        """drag：[[sx,sy,ex,ey]] 原图像素 → +bbox 映射视口 → _human_drag。"""
+        for seg in answer:
+            try:
+                sx, sy, ex, ey = int(seg[0]), int(seg[1]), int(seg[2]), int(seg[3])
+            except (ValueError, TypeError, IndexError):
+                continue
+            vsx, vsy = bbox_x + sx, bbox_y + sy
+            vex, vey = bbox_x + ex, bbox_y + ey
+            print(f"  [classify] drag ({vsx:.0f},{vsy:.0f}) -> ({vex:.0f},{vey:.0f})")
+            await self._human_drag(page, vsx, vsy, vex, vey, bezier=self._humanize)
+
+    async def _click_submit(self, page: Page) -> bool:
+        """点 challenge iframe 内 .button-submit 提交（对齐库 challenger.py:642）。"""
+        fr = await self._find_challenge_frame(page)
+        if fr is None:
+            print("  [classify] challenge frame gone, cannot submit")
+            return False
+        try:
+            btn = fr.locator(_SUBMIT_BUTTON_XPATH)
+            if await btn.count() == 0:
+                print("  [classify] submit button not found")
+                return False
+            box = await btn.bounding_box()
+            if box is None:
+                print("  [classify] submit button not visible")
+                return False
+            cx = box["x"] + box["width"] / 2
+            cy = box["y"] + box["height"] / 2
+            await asyncio.sleep(random.uniform(0.3, 0.8))
+            await self._human_click(page, cx, cy, bezier=self._humanize)
+            print(f"  [classify] submit clicked at ({cx:.0f},{cy:.0f})")
+            return True
+        except Exception as exc:
+            print(f"  [classify] submit failed: {exc}")
+            return False
 
     async def _wait_hcaptcha_token(self, page: Page) -> str | None:
-        """等待 /getcaptcha/ 返回 pass，提取 token。（TODO: 阶段 3 实现）"""
-        print("  [TODO] Waiting for hCaptcha pass and token")
-        return "stub-token-placeholder"
+        """等 hCaptcha 验证通过，从 /getcaptcha/ 响应取 generated_pass_UUID。
+
+        对齐库 challenger.py wait_for_challenge：回填提交后 hCaptcha 发 /getcaptcha/
+        验证，pass=true 时响应含 generated_pass_UUID（P1_eyJ0...）。_on_response 已
+        捕获到 self._captured_token，这里轮询至超时。
+        """
+        deadline = time.time() + self.timeout_seconds
+        while time.time() < deadline:
+            if self._captured_token:
+                print(f"  [classify] hCaptcha pass, token len={len(self._captured_token)}")
+                return self._captured_token
+            await asyncio.sleep(0.5)
+        print("  [classify] timed out waiting for hCaptcha pass")
+        return None
 
     async def _inject_hcaptcha_token(self, page: Page, token: str):
         """注入 token 到 textarea[name="h-captcha-response"]（已有实现，直接复用）。"""
@@ -601,5 +1147,6 @@ def build_captcha_solver(config: CaptchaConfig) -> CaptchaSolver:
             poll_interval_seconds=config.poll_interval_seconds,
             timeout_seconds=config.timeout_seconds,
             local_solver_url=config.local_solver_url or config.classify_solver_url,
+            humanize=config.classify_humanize,
         )
     raise ValueError(f"Unsupported captcha mode: {config.mode}")
