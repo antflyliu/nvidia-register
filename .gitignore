@@ -6,6 +6,13 @@ config.toml
 accounts.csv
 nvidia_api_key.txt
 
+# 运行时日志（logging_setup 落盘产物，本地对账用，不入版本）
+logs/
+
+# 本地诊断脚本/截图（调试残留，按需保留本地副本）
+diag-*.png
+diag-*.txt
+
 # Python
 __pycache__/
 *.pyc
