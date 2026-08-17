@@ -12,6 +12,7 @@ logs/
 # 本地诊断脚本/截图（调试残留，按需保留本地副本）
 diag-*.png
 diag-*.txt
+_diag_*.py
 
 # prototype 可视化对照图（判图答案标注，本地人眼对照用，不入版本）
 prototype/out/
@@ -33,3 +34,7 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+.pytest_cache
+.cocoindex_code
+.omc
