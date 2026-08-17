@@ -48,8 +48,9 @@ class CaptchaConfig:
     local_solver_url: str
     classify_solver_url: str
     classify_humanize: bool
-    poll_interval_seconds: int
-    timeout_seconds: int
+    classify_fallback_local: bool = False
+    poll_interval_seconds: int = 3
+    timeout_seconds: int = 180
 
 
 @dataclass(frozen=True)
@@ -276,6 +277,10 @@ def load_config() -> AppConfig:
     # classify 模式 checkbox 点击是否加贝塞尔真人轨迹。普通 chromium 需 True；
     # camoufox(humanize=True) 浏览器内核已真人化，设 False 更快。默认 True。
     classify_humanize = _get_bool(data, "captcha.classify_humanize", True)
+    # classify 模式判图失败时是否 fallback 到 LocalSolver（打 /createTask，会触发
+    # camoufox-turnstile 服务端开 camoufox 浏览器）。默认 False 保持无浏览器语义；
+    # 置 True 恢复旧真机兜底行为。详见 memory classify-fallback-opens-browser.md。
+    classify_fallback_local = _get_bool(data, "captcha.classify_fallback_local", False)
 
     browser_engine = _get_str(data, "browser.engine", "camoufox").lower()
     if browser_engine not in {"camoufox", "chromium"}:
@@ -313,6 +318,7 @@ def load_config() -> AppConfig:
             local_solver_url=local_solver_url,
             classify_solver_url=classify_solver_url,
             classify_humanize=classify_humanize,
+            classify_fallback_local=classify_fallback_local,
             poll_interval_seconds=_get_int(data, "captcha.poll_interval_seconds", 3),
             timeout_seconds=_get_int(data, "captcha.timeout_seconds", 180),
         ),

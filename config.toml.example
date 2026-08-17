@@ -30,6 +30,7 @@ captcharun_api_url = "https://api.captcha-run.com"
 local_solver_url = "http://127.0.0.1:5072" # local 模式 + classify fallback：camoufox-turnstile 服务地址
 classify_solver_url = "http://127.0.0.1:5072" # classify 模式：POST /v1/classify 纯判图
 classify_humanize = false # camoufox 内核已 humanize 设 false；普通 chromium 设 true
+classify_fallback_local = false # classify 判图失败时是否 fallback 打 /createTask（会触发服务端开 camoufox 浏览器）。默认 false 保持无浏览器语义，失败就让当前账号失败；置 true 恢复旧真机兜底
 poll_interval_seconds = 3
 timeout_seconds = 180
 

@@ -536,11 +536,19 @@ class ClassifySolver:
         timeout_seconds: int = 60,
         local_solver_url: str | None = None,
         humanize: bool = True,
+        fallback_local: bool = False,
     ):
         self.api_url = api_url.rstrip("/")
         self.poll_interval_seconds = poll_interval_seconds
         self.timeout_seconds = timeout_seconds
         self.local_solver_url = local_solver_url or api_url
+        # classify 模式的初衷是"无浏览器纯判图"：服务端 /v1/classify 不开浏览器。
+        # 但 LocalSolver 走 /createTask（HCaptchaTaskProxyless）会触发服务端
+        # CamoufoxHCaptchaSolver 开 camoufox 浏览器，违背该模式初衷。默认 False：
+        # 判图/回填失败时不再 fallback 开浏览器，而是直接让当前账号失败。
+        # 显式置 True 可恢复旧行为（真机兜底）。详见
+        # memory classify-fallback-opens-browser.md。
+        self._fallback_local_enabled = bool(fallback_local)
         # checkbox 点击是否加贝塞尔真人轨迹。普通 chromium 需 True（绕过 hCaptcha
         # 自动化检测）；camoufox(humanize=True) 浏览器内核已真人化，设 False 直接
         # 点击更快（camoufox 文档建议关自定义贝塞尔）。
@@ -1281,7 +1289,18 @@ class ClassifySolver:
         await _inject_hcaptcha_token(page, token)
 
     async def _fallback_local(self, page: Page) -> bool:
-        """委托 LocalSolver 真机兜底（零重复逻辑）。"""
+        """委托 LocalSolver 真机兜底（零重复逻辑）。
+
+        仅当 self._fallback_local_enabled=True 时才真正调 LocalSolver（打
+        /createTask → 服务端 CamoufoxHCaptchaSolver 开 camoufox 浏览器）。
+        默认 False：classify 模式保持"无浏览器"语义，判图/回填失败直接让
+        当前账号失败，绝不退化到开浏览器路径。详见
+        memory classify-fallback-opens-browser.md。
+        """
+        if not self._fallback_local_enabled:
+            print("  [classify] fallback_local disabled (mode=classify 无浏览器语义)，"
+                  "判图/回填失败，不 fallback 开浏览器，当前账号失败")
+            return False
         print("  falling back to local solver (real browser)")
         local = LocalSolver(
             api_url=self.local_solver_url,
@@ -1329,5 +1348,6 @@ def build_captcha_solver(config: CaptchaConfig) -> CaptchaSolver:
             timeout_seconds=config.timeout_seconds,
             local_solver_url=config.local_solver_url or config.classify_solver_url,
             humanize=config.classify_humanize,
+            fallback_local=config.classify_fallback_local,
         )
     raise ValueError(f"Unsupported captcha mode: {config.mode}")

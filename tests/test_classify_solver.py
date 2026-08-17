@@ -9,7 +9,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import captcha as captcha_mod
-from captcha import ClassifySolver, LocalSolver, reset_captcha_state
+from captcha import ClassifySolver, reset_captcha_state
 
 
 class FakePage:
@@ -214,6 +214,60 @@ class ClassifySolverMultiRoundTests(unittest.TestCase):
         self.assertEqual(solver._wait_token_brief.await_count, 2)
         # refresh 调 2 次（attempt 2 和 attempt 3 前）
         self.assertEqual(solver._refresh_challenge.await_count, 2)
+
+
+class ClassifySolverNoFallbackByDefaultTests(unittest.TestCase):
+    """mode=classify 默认不应在判图失败时打 /createTask 开浏览器。
+
+    回归：camoufox-turnstile 服务端 /v1/classify 是纯 LLM 判图不开浏览器，
+    但旧 ClassifySolver 在判图失败时 fallback 到 LocalSolver（打 /createTask
+    HCaptchaTaskProxyless）会触发服务端 CamoufoxHCaptchaSolver 开 camoufox
+    浏览器，违背 classify 模式"无浏览器"初衷。新默认 classify_fallback_local=False
+    时 _fallback_local 直接返回 False 不打 createTask。详见
+    memory/classify-fallback-opens-browser.md。
+    """
+    def setUp(self) -> None:
+        reset_captcha_state()
+
+    def test_default_no_fallback_does_not_call_local_solver(self) -> None:
+        solver = ClassifySolver(
+            api_url="http://127.0.0.1:5072",
+            poll_interval_seconds=0,
+            timeout_seconds=5,
+            local_solver_url="http://127.0.0.1:5072",
+            # 新默认：classify_fallback_local=False
+            fallback_local=False,
+        )
+        self.assertFalse(solver._fallback_local_enabled)
+        # 把 _click_checkbox mock 成失败 → solve() 第 0 步就 fallback_local
+        solver._click_checkbox = mock.AsyncMock(return_value=False)  # type: ignore[method-assign]
+        # LocalSolver.solve 绝不能被调；若被调说明 fallback 打了 createTask
+        local_solve = mock.AsyncMock(return_value=True)
+        with mock.patch.object(captcha_mod, "LocalSolver") as LocalCls:
+            LocalCls.return_value.solve = local_solve
+            ok = asyncio.run(solver.solve(FakePage()))
+        # 默认不 fallback：返回 False，账号失败，但不开浏览器
+        self.assertFalse(ok)
+        local_solve.assert_not_awaited()
+        self.assertEqual(LocalCls.call_count, 0)
+
+    def test_fallback_enabled_preserves_old_behavior(self) -> None:
+        """显式 classify_fallback_local=True 仍走 LocalSolver（向后兼容）。"""
+        solver = ClassifySolver(
+            api_url="http://127.0.0.1:5072",
+            poll_interval_seconds=0,
+            timeout_seconds=5,
+            local_solver_url="http://127.0.0.1:5072",
+            fallback_local=True,
+        )
+        self.assertTrue(solver._fallback_local_enabled)
+        solver._click_checkbox = mock.AsyncMock(return_value=False)  # type: ignore[method-assign]
+        local_solve = mock.AsyncMock(return_value=True)
+        with mock.patch.object(captcha_mod, "LocalSolver") as LocalCls:
+            LocalCls.return_value.solve = local_solve
+            ok = asyncio.run(solver.solve(FakePage()))
+        self.assertTrue(ok)
+        local_solve.assert_awaited_once()
 
 
 class ClassifySolverBuildTests(unittest.TestCase):
