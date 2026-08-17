@@ -636,7 +636,10 @@ class ClassifySolver:
             # 第 2 轮起重新取图（等下一轮挑战渲染）
             if cid > 0:
                 await asyncio.sleep(1.5)
-                self._captured_challenge_js = None
+                # 不重置 _captured_challenge_js：多轮挑战类型不变（同一
+                # challenge.js），hCaptcha 多轮是同挑战框内切换内容不重新加载
+                # challenge.js。重置会导致 _capture_challenge 等 10s 超时，
+                # challenge.js=None 走 DOM 兜底误判类型（如 point 误判 drag）。
                 challenge = await self._capture_challenge(page)
                 if challenge is None:
                     print("  no challenge frame for crumb %d" % (cid + 1))
