@@ -572,62 +572,92 @@ class ClassifySolver:
         return False
 
     async def _solve_rounds(self, page: Page) -> str | None:
-        """多轮挑战循环：每轮取图→判图→回填→提交，直到拿到 pass token 或超上限。
+        """多轮挑战循环（对齐库 challenge_image_drag_drop 的 for cid in range(crumb_count)）。
 
-        hCaptcha 多轮机制（对齐库 challenge_image_drag_drop 的 for cid in
-        range(crumb_count)）：每轮独立 submit，全部通过后 /getcaptcha/ 返回
-        pass=true + generated_pass_UUID。_on_response 已捕获到 _captured_token，
-        每轮提交后轮询；未 pass 则等下一轮挑战刷新，继续取图。
+        hCaptcha 多轮机制：单次 /getcaptcha/ 下发 tasklist，长度=轮数。库在单次
+        挑战内 for cid 循环跑完所有轮——每轮取图→判图→回填→提交，循环内**不查
+        pass**，所有轮提交后才在 wait_for_challenge 查 pass。本方法对齐此模型：
+
+        1. round 1 取图后读 crumb_count（DOM .Crumb 数），确定本轮挑战的轮数
+        2. 循环 crumb_count 轮：取图→判图→回填→提交（不等 pass）
+        3. 所有轮提交后统一等 pass token
+        4. 没拿到 pass → refresh 重试整个流程（对齐库 RETRY_ON_FAILURE）
+
+        crumb_count 读不到（DOM 未渲染）时退化为单轮，提交后等 pass，没 pass
+        则重试（覆盖 NVIDIA 单轮场景）。
         """
         deadline = time.time() + self.timeout_seconds
-        for rnd in range(1, _MAX_CHALLENGE_ROUNDS + 1):
+        for attempt in range(1, _MAX_CHALLENGE_ROUNDS + 1):
             if time.time() > deadline:
                 print("  [classify] rounds timeout")
-                break
-            print(f"  [classify] === round {rnd}/{_MAX_CHALLENGE_ROUNDS} ===")
+                return None
 
-            # 取图（第 2 轮起要等新挑战刷新渲染）
-            if rnd > 1:
-                await asyncio.sleep(1.5)  # 等下一轮挑战刷新
-                self._captured_challenge_js = None  # 新轮 challenge.js 可能不同
+            # round 1 取图 + 读 crumb_count
+            if attempt > 1:
+                await asyncio.sleep(1.5)  # 等刷新后新挑战渲染
+                self._captured_challenge_js = None
             challenge = await self._capture_challenge(page)
             if challenge is None:
                 print("  no challenge frame surfaced")
                 return None
 
-            # round 1 诊断：读 hCaptcha 预设的 Crumb 数（多轮指示器，对齐库
-            # check_crumb_count）。单轮=1，多轮=2+。确认 hCaptcha 实际给几轮。
-            if rnd == 1:
-                crumb_n = await self._read_crumb_count(page)
-                print(f"  [classify] hCaptcha crumb_count = {crumb_n} "
-                      f"({'多轮' if crumb_n > 1 else '单轮'})")
+            crumb_n = await self._read_crumb_count(page)
+            print(f"  [classify] attempt {attempt}/{_MAX_CHALLENGE_ROUNDS} "
+                  f"crumb_count={crumb_n} ({'多轮' if crumb_n > 1 else '单轮'})")
 
-            # bbox 不支持，fallback
+            # bbox 不支持
             if challenge.get("captcha_type") == "bbox":
                 print("  bbox unsupported by classify")
                 return None
+
+            # 循环 crumb_n 轮：取图→判图→回填→提交（不等 pass，对齐库 for cid）
+            round_ok = await self._run_crumbs(page, challenge, crumb_n)
+            if not round_ok:
+                return None  # 某轮判图/回填失败，fallback
+
+            # 所有轮提交后统一等 pass token
+            token = await self._wait_token_brief()
+            if token:
+                return token
+            print("  [classify] no pass after all crumbs, refresh and retry")
+
+        print("  [classify] exhausted all attempts without pass")
+        return None
+
+    async def _run_crumbs(self, page: Page, first_challenge: dict, crumb_n: int) -> bool:
+        """跑 crumb_n 轮挑战（对齐库 for cid in range(crumb_count)）。
+
+        每轮：取图→判图→回填→提交，循环内不等 pass。第 1 轮复用已取的
+        first_challenge，第 2 轮起重新取图（每轮挑战图不同）。
+        """
+        challenge = first_challenge
+        for cid in range(crumb_n):
+            print(f"  [classify] === crumb {cid + 1}/{crumb_n} ===")
+            # 第 2 轮起重新取图（等下一轮挑战渲染）
+            if cid > 0:
+                await asyncio.sleep(1.5)
+                self._captured_challenge_js = None
+                challenge = await self._capture_challenge(page)
+                if challenge is None:
+                    print("  no challenge frame for crumb %d" % (cid + 1))
+                    return False
+                if challenge.get("captcha_type") == "bbox":
+                    print("  bbox unsupported by classify")
+                    return False
 
             # 判图
             answer = self._classify(challenge)
             if answer is None:
                 print("  classify returned unsupported or failed")
-                return None
+                return False
             print(f"  [classify] answer = {answer}")
 
             # 回填 + 提交
             ok = await self._apply_answer(page, challenge, answer)
             if not ok:
                 print("  apply_answer failed")
-                return None
-
-            # 等本轮 pass token（短等：pass 了就退出，没 pass 等下一轮）
-            token = await self._wait_token_brief()
-            if token:
-                return token
-            print("  [classify] no pass this round, continue next round")
-
-        print("  [classify] exhausted all rounds without pass")
-        return None
+                return False
+        return True
 
     async def _read_crumb_count(self, page: Page) -> int:
         """读 hCaptcha 挑战框 .Crumb 元素数（多轮指示器，对齐库 check_crumb_count）。
