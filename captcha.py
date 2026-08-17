@@ -72,7 +72,7 @@ class YesCaptchaSolver:
                     "websiteKey": website_key,
                 },
             },
-            timeout=30,
+            timeout=60,
         )
         data = response.json()
         if data.get("errorId"):
@@ -89,7 +89,7 @@ class YesCaptchaSolver:
                 response = requests.post(
                     f"{self.api_url}/getTaskResult",
                     json={"clientKey": self.client_key, "taskId": task_id},
-                    timeout=30,
+                    timeout=60,
                 )
                 data = response.json()
             except requests.RequestException as exc:
@@ -150,7 +150,7 @@ class CaptchaRunSolver:
                 "userAgent": user_agent,
                 "fallbackToActualUA": True,
             },
-            timeout=30,
+            timeout=60,
         )
         data = _response_json(response)
         if not response.ok:
@@ -168,7 +168,7 @@ class CaptchaRunSolver:
             response = requests.get(
                 f"{self.api_url}/v2/tasks/{task_id}",
                 headers=self._headers(content_type=False),
-                timeout=30,
+                timeout=60,
             )
             data = _response_json(response)
             if not response.ok:
@@ -218,7 +218,8 @@ class LocalSolver:
         user_agent = await page.evaluate("() => navigator.userAgent")
         # 提取当前页面会话 cookie。NVIDIA 的 hCaptcha 只在携带会话 cookie 时
         # 才加载（login.nvgs.nvidia.com），服务用这些 cookie 开浏览器才能渲染挑战。
-        cookies = await page.context.cookies()
+        raw_cookies = await page.context.cookies()
+        cookies: list[dict[str, Any]] = [dict(c) for c in raw_cookies]
         # 本地化日志：每次 createTask 都打印一条，带上 websiteURL 片段，便于
         # 与服务端 `hcaptcha solve.start cr=N` 日志对账「一个账号的发起了几次求解」。
         print(f"  [local-solver] createTask websiteURL={page.url[:80]} "
@@ -273,7 +274,7 @@ class LocalSolver:
             response = requests.post(
                 f"{self.api_url}/createTask",
                 json={"task": task},
-                timeout=30,
+                timeout=60,
             )
             data = response.json()
         except requests.RequestException as exc:
@@ -292,7 +293,7 @@ class LocalSolver:
                 response = requests.post(
                     f"{self.api_url}/getTaskResult",
                     json={"taskId": task_id},
-                    timeout=30,
+                    timeout=60,
                 )
                 data = response.json()
             except requests.RequestException as exc:
@@ -353,7 +354,7 @@ async def _get_site_key(page: Page) -> str | None:
     if _captured_sitekey:
         return _captured_sitekey
     # 等待网络请求捕获（hCaptcha iframe 可能还在加载）
-    for _ in range(30):
+    for _ in range(60):
         if _captured_sitekey:
             return _captured_sitekey
         await asyncio.sleep(1)
@@ -469,9 +470,14 @@ _CHECKBOX_IFRAME_XPATH = (
 )
 # 提交按钮（对齐库 challenger.py:641）。
 _SUBMIT_BUTTON_XPATH = "//div[@class='button-submit button']"
+# refresh 按钮（挑战框右下，换题）。真机探查：div.refresh.button，
+# aria-label="Refresh Challenge."，role="button"。点它触发新 /getcaptcha/
+# 下发新 tasklist。注：同类型换题时 challenge.js 从缓存加载不重新触发 response，
+# 故 attempt 2+ 点 refresh 后复用 attempt 1 的 challenge.js 类型（见 _solve_rounds）。
+_REFRESH_BUTTON_XPATH = "//div[@class='refresh button']"
 
 # 等待 iframe/渲染/图片的超时（秒）。
-_WAIT_IFRAME_SEC = 30
+_WAIT_IFRAME_SEC = 60
 _WAIT_RENDER_SEC = 15
 _WAIT_IMAGE_SEC = 15
 # 多轮挑战最大轮数（对齐库 MAX_CRUMB_COUNT 默认 2，留余量覆盖 3 轮 + 失败重试）。
@@ -527,7 +533,7 @@ class ClassifySolver:
         self,
         api_url: str,
         poll_interval_seconds: int = 1,
-        timeout_seconds: int = 30,
+        timeout_seconds: int = 60,
         local_solver_url: str | None = None,
         humanize: bool = True,
     ):
@@ -581,10 +587,12 @@ class ClassifySolver:
         1. round 1 取图后读 crumb_count（DOM .Crumb 数），确定本轮挑战的轮数
         2. 循环 crumb_count 轮：取图→判图→回填→提交（不等 pass）
         3. 所有轮提交后统一等 pass token
-        4. 没拿到 pass → refresh 重试整个流程（对齐库 RETRY_ON_FAILURE）
+        4. 没拿到 pass → 点 refresh 按钮换题（对齐库 RETRY_ON_FAILURE），复用
+           attempt 1 的 challenge.js 类型（refresh 同类型换题不重新加载
+           challenge.js），重试整个流程
 
         crumb_count 读不到（DOM 未渲染）时退化为单轮，提交后等 pass，没 pass
-        则重试（覆盖 NVIDIA 单轮场景）。
+        则 refresh 重试（覆盖 NVIDIA 单轮场景）。
         """
         deadline = time.time() + self.timeout_seconds
         for attempt in range(1, _MAX_CHALLENGE_ROUNDS + 1):
@@ -592,14 +600,28 @@ class ClassifySolver:
                 print("  [classify] rounds timeout")
                 return None
 
-            # round 1 取图 + 读 crumb_count
+            # attempt 2+：点 refresh 换题（对齐库 RETRY_ON_FAILURE）。不重置
+            # _captured_challenge_js：真机实测 refresh 同类型换题时 challenge.js
+            # 从浏览器缓存加载，不触发新 response 事件，_on_response 捕获不到；
+            # 且 challenge.js 在父页面加载，challenge iframe 内无 <script> 标签
+            # 可兜底（DOM 兜底是死代码）。复用 attempt 1 的 challenge.js 类型——
+            # 同类型换题（point→point）类型不变，复用正确。换类型罕见，即使复用
+            # 错，判图/回填失败会 no pass 继续重试或 fallback，不卡死。
             if attempt > 1:
-                await asyncio.sleep(1.5)  # 等刷新后新挑战渲染
-                self._captured_challenge_js = None
+                refreshed = await self._refresh_challenge(page)
+                if not refreshed:
+                    print("  [classify] refresh failed, cannot retry")
+                    return None
+                await asyncio.sleep(1.5)  # 等新挑战渲染（真机实测 1s 内完成）
+
             challenge = await self._capture_challenge(page)
             if challenge is None:
-                print("  no challenge frame surfaced")
-                return None
+                # 取图失败：attempt 1 直接退出；attempt 2+ 继续下一轮 refresh 重试。
+                if attempt == 1:
+                    print("  no challenge frame surfaced")
+                    return None
+                print("  [classify] capture failed after refresh, retry next attempt")
+                continue
 
             crumb_n = await self._read_crumb_count(page)
             print(f"  [classify] attempt {attempt}/{_MAX_CHALLENGE_ROUNDS} "
@@ -648,10 +670,17 @@ class ClassifySolver:
                     print("  bbox unsupported by classify")
                     return False
 
-            # 判图
-            answer = self._classify(challenge)
+            # 判图（LLM 偶尔超时/502，重试 2 次避免单次抖动放弃整轮）
+            answer = None
+            for classify_attempt in range(1, 3):
+                answer = self._classify(challenge)
+                if answer is not None:
+                    break
+                if classify_attempt < 2:
+                    print(f"  classify attempt {classify_attempt} failed, retrying...")
+                    await asyncio.sleep(1.5)
             if answer is None:
-                print("  classify returned unsupported or failed")
+                print("  classify returned unsupported or failed (after retry)")
                 return False
             print(f"  [classify] answer = {answer}")
 
@@ -712,6 +741,7 @@ class ClassifySolver:
             if not self._captured_challenge_js:
                 if "/challenge/" in url and url.endswith("/challenge.js"):
                     self._captured_challenge_js = url
+
             # hCaptcha 验证通过 → /getcaptcha/ 或 /checkcaptcha/ 响应 {pass:true,
             # generated_pass_UUID:...}。对齐库 challenger.py:723-734 + 783-788
             # （两个端点都可能返回 pass 结果）。token 只取首个 pass 响应。
@@ -954,7 +984,9 @@ class ClassifySolver:
             tail = self._captured_challenge_js.split("/challenge/")[-1]
             challenge_js_type = tail.rsplit("/challenge.js", 1)[0]
             detected_type = _CHALLENGE_JS_TYPE_MAP.get(challenge_js_type, "unknown")
-        # DOM 兜底
+        # DOM 兜底（注：真机实测 challenge.js 在父页面加载，challenge iframe
+        # 内无 <script src*=challenge> 标签，此查询永远返回 null——此分支实际
+        # 不生效，类型识别完全依赖上面的 _on_response 网络监听。保留作防御。）
         if challenge_js_type is None:
             try:
                 js_in_dom = await fr.evaluate(
@@ -1013,9 +1045,18 @@ class ClassifySolver:
         n_task_images = await fr.eval_on_selector_all(_TASK_IMAGE_SEL, "els => els.length") or 0
         if detected_type == "unknown":
             if n_task_images == 9:
+                # 九宫格：只有 grid 有 9 个 .task-image，可安全兜底
                 detected_type = "grid"
-            elif n_task_images == 0:
-                detected_type = "drag"
+            else:
+                # point/drag 的 task_images 都是 0（point 在整图 canvas 上点，drag
+                # 拖 canvas 内元素），n_task_images 无法区分二者。challenge.js 是
+                # 区分 point/drag 的唯一可靠信号——若 challenge.js 与 DOM 兜底都
+                # 没拿到类型，硬猜 drag 会把 point 误判成 drag（真机实测：attempt 2
+                # refresh 后 challenge.js=None → 误判 drag → 拖拽失败）。此时
+                # 报错退出，由 _solve_rounds refresh 换题重试，不赌类型。
+                print("  [classify] type unknown (challenge.js not captured, "
+                      "DOM fallback failed) — refuse to guess, abort capture")
+                return None
 
         # 6) 取问句
         question_el = await fr.query_selector(_QUESTION_SEL)
@@ -1023,11 +1064,13 @@ class ClassifySolver:
         question = (question or "").strip()
 
         # 7) 截 challenge-view 整块
-        png = await cv.screenshot()
+        # 用 Locator 而非 ElementHandle（cv）：refresh 换题后 challenge-view DOM
+        # 重建，ElementHandle 会 detach（screenshot 抛 "not attached to the DOM"）。
+        # Locator 每次调用自动重新查找，refresh 后仍有效。
+        cv_locator = fr.locator(_CHALLENGE_VIEW_SEL)
         # bbox 用 Locator 方式取（与 _click_checkbox 一致，返回主框架视口坐标，
         # 比 ElementHandle.bounding_box() 在 iframe 内更可靠）。drag/point 回填
         # 路 B：服务端返回截图内像素坐标，客户端 +bbox_x/+bbox_y 映射到视口。
-        cv_locator = fr.locator(_CHALLENGE_VIEW_SEL)
         box = await cv_locator.bounding_box()
         if box:
             w, h = int(box["width"]), int(box["height"])
@@ -1035,6 +1078,26 @@ class ClassifySolver:
         else:
             w, h = -1, -1
             bbox_x, bbox_y = 0.0, 0.0
+
+        # 截图：crumb 切换时 hCaptcha 有过渡动画，Playwright 默认等元素 stable
+        # 会卡到默认 30s 超时整轮崩（真机实测 crumb 2/2 复现）。三防：
+        #   - animations="disabled"：不等过渡动画结束（not-stable 主因）
+        #   - timeout=60000：给足 crumb 切换渲染时间，超时才降级
+        #   - 降级 page.screenshot(clip=)：按 bbox 矩形截页面，不依赖元素 stable
+        png = None
+        try:
+            png = await cv_locator.screenshot(timeout=60000, animations="disabled")
+        except Exception as exc:
+            print(f"  [classify] element screenshot failed ({exc}); fallback clip")
+            if box and w > 0 and h > 0:
+                try:
+                    png = await page.screenshot(
+                        clip={"x": bbox_x, "y": bbox_y, "width": w, "height": h}
+                    )
+                except Exception as exc2:
+                    print(f"  [classify] clip screenshot also failed: {exc2}")
+            if png is None:
+                return None
 
         print(f"  [classify] type={detected_type} js={challenge_js_type!r} "
               f"q={question!r} size={w}x{h} task_images={n_task_images}")
@@ -1176,6 +1239,41 @@ class ClassifySolver:
             return True
         except Exception as exc:
             print(f"  [classify] submit failed: {exc}")
+            return False
+
+    async def _refresh_challenge(self, page: Page) -> bool:
+        """点 challenge iframe 内 refresh 按钮换题（对齐库 RETRY_ON_FAILURE）。
+
+        真机探查：refresh 按钮 div.refresh.button（aria-label="Refresh Challenge."）。
+        点它触发新 /getcaptcha/ 下发新 tasklist。返回 True 若点到按钮；False 若
+        按钮未出现/不可见。
+
+        注：真机实测 refresh 同类型换题时 challenge.js 从浏览器缓存加载，不触发
+        新 response 事件，_on_response 捕不到新 challenge.js。故调用方（_solve_rounds）
+        点完 refresh 后**不重置** _captured_challenge_js，复用 attempt 1 的类型——
+        同类型换题类型不变，复用正确。
+        """
+        fr = await self._find_challenge_frame(page)
+        if fr is None:
+            print("  [classify] challenge frame gone, cannot refresh")
+            return False
+        try:
+            btn = fr.locator(_REFRESH_BUTTON_XPATH)
+            if await btn.count() == 0:
+                print("  [classify] refresh button not found")
+                return False
+            box = await btn.bounding_box()
+            if box is None:
+                print("  [classify] refresh button not visible")
+                return False
+            cx = box["x"] + box["width"] / 2
+            cy = box["y"] + box["height"] / 2
+            await asyncio.sleep(random.uniform(0.3, 0.8))
+            await self._human_click(page, cx, cy, bezier=self._humanize)
+            print(f"  [classify] refresh clicked at ({cx:.0f},{cy:.0f})")
+            return True
+        except Exception as exc:
+            print(f"  [classify] refresh failed: {exc}")
             return False
 
     async def _inject_hcaptcha_token(self, page: Page, token: str):
