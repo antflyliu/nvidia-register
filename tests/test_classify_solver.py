@@ -154,6 +154,7 @@ class ClassifySolverMultiRoundTests(unittest.TestCase):
         solver._classify = mock.Mock(return_value=[[10, 20, 30, 40]])  # type: ignore[method-assign]
         solver._apply_answer = mock.AsyncMock(return_value=True)  # type: ignore[method-assign]
         solver._wait_token_brief = mock.AsyncMock(return_value=None)  # type: ignore[method-assign]
+        solver._refresh_challenge = mock.AsyncMock(return_value=True)  # type: ignore[method-assign]
         fallback = mock.AsyncMock(return_value=True)
         solver._fallback_local = fallback  # type: ignore[method-assign]
         ok = asyncio.run(solver.solve(FakePage()))
@@ -161,7 +162,58 @@ class ClassifySolverMultiRoundTests(unittest.TestCase):
         # 跑满 _MAX_CHALLENGE_ROUNDS 次 attempt 后 fallback
         from captcha import _MAX_CHALLENGE_ROUNDS
         self.assertEqual(solver._wait_token_brief.await_count, _MAX_CHALLENGE_ROUNDS)
+        # attempt 2+ 每轮都 refresh（attempt 1 不 refresh），共 _MAX-1 次
+        self.assertEqual(solver._refresh_challenge.await_count, _MAX_CHALLENGE_ROUNDS - 1)
         fallback.assert_awaited_once()
+
+    def test_attempt2_calls_real_refresh(self) -> None:
+        """attempt 1 no pass → attempt 2 前调 _refresh_challenge（真换题，非空循环）。"""
+        solver = self._make_solver()
+        solver._click_checkbox = mock.AsyncMock(return_value=True)  # type: ignore[method-assign]
+        solver._capture_challenge = mock.AsyncMock(return_value=self._challenge())  # type: ignore[method-assign]
+        solver._read_crumb_count = mock.AsyncMock(return_value=1)  # type: ignore[method-assign]
+        solver._classify = mock.Mock(return_value=[[10, 20, 30, 40]])  # type: ignore[method-assign]
+        solver._apply_answer = mock.AsyncMock(return_value=True)  # type: ignore[method-assign]
+        # attempt 1 no pass，attempt 2 pass
+        solver._wait_token_brief = mock.AsyncMock(side_effect=[None, "fake-token-2443"])  # type: ignore[method-assign]
+        solver._refresh_challenge = mock.AsyncMock(return_value=True)  # type: ignore[method-assign]
+        solver._inject_hcaptcha_token = mock.AsyncMock(return_value=True)  # type: ignore[method-assign]
+        # 模拟 attempt 1 已捕获 challenge.js（_capture_challenge 依赖它判类型）
+        solver._captured_challenge_js = "https://x/challenge/image_label_area_select/challenge.js"
+        with mock.patch.object(captcha_mod, "_is_register_button_enabled",
+                               new=mock.AsyncMock(side_effect=[True])):
+            ok = asyncio.run(solver.solve(FakePage()))
+        self.assertTrue(ok)
+        # attempt 1 不 refresh，attempt 2 前 refresh 1 次
+        solver._refresh_challenge.assert_awaited_once()
+        # refresh 后不重置 _captured_challenge_js（复用 attempt 1 类型，真机实测
+        # refresh 同类型换题不重新加载 challenge.js）
+        self.assertIsNotNone(solver._captured_challenge_js)
+
+    def test_capture_none_after_refresh_retries(self) -> None:
+        """attempt 2+ refresh 后 _capture_challenge 返回 None（类型未知）→ continue 重试，不退出。"""
+        solver = self._make_solver()
+        solver._click_checkbox = mock.AsyncMock(return_value=True)  # type: ignore[method-assign]
+        # attempt 1 取图成功但 no pass；attempt 2 refresh 后取图 None（类型未知）；
+        # attempt 3 取图成功且 pass
+        solver._capture_challenge = mock.AsyncMock(
+            side_effect=[self._challenge(), None, self._challenge()])  # type: ignore[method-assign]
+        solver._read_crumb_count = mock.AsyncMock(return_value=1)  # type: ignore[method-assign]
+        solver._classify = mock.Mock(return_value=[[10, 20, 30, 40]])  # type: ignore[method-assign]
+        solver._apply_answer = mock.AsyncMock(return_value=True)  # type: ignore[method-assign]
+        solver._wait_token_brief = mock.AsyncMock(side_effect=[None, "fake-token-2443"])  # type: ignore[method-assign]
+        solver._refresh_challenge = mock.AsyncMock(return_value=True)  # type: ignore[method-assign]
+        solver._inject_hcaptcha_token = mock.AsyncMock(return_value=True)  # type: ignore[method-assign]
+        with mock.patch.object(captcha_mod, "_is_register_button_enabled",
+                               new=mock.AsyncMock(side_effect=[True])):
+            ok = asyncio.run(solver.solve(FakePage()))
+        self.assertTrue(ok)
+        # attempt 2 capture None 被 continue 跳过（不 apply_answer 不 wait_token），
+        # attempt 3 正常走完拿 token：apply_answer 2 次（attempt 1 + 3），wait 2 次
+        self.assertEqual(solver._apply_answer.await_count, 2)
+        self.assertEqual(solver._wait_token_brief.await_count, 2)
+        # refresh 调 2 次（attempt 2 和 attempt 3 前）
+        self.assertEqual(solver._refresh_challenge.await_count, 2)
 
 
 class ClassifySolverBuildTests(unittest.TestCase):
