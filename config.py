@@ -64,6 +64,7 @@ class NvidiaConfig:
 class BrowserConfig:
     headless: bool
     close_delay_seconds: int
+    engine: str  # "camoufox" | "chromium"；camoufox 产生 isTrusted 鼠标事件，过 hCaptcha checkbox 自动化检测
 
 
 @dataclass(frozen=True)
@@ -262,8 +263,8 @@ def load_config() -> AppConfig:
             )
 
     captcha_mode = _get_str(data, "captcha.mode", "manual").lower()
-    if captcha_mode not in {"manual", "yescaptcha", "captcharun", "local"}:
-        raise ValueError("captcha.mode must be 'manual', 'yescaptcha', 'captcharun' or 'local'")
+    if captcha_mode not in {"manual", "yescaptcha", "captcharun", "local", "classify"}:
+        raise ValueError("captcha.mode must be 'manual', 'yescaptcha', 'captcharun', 'local' or 'classify'")
     yescaptcha_client_key = _get_str(data, "captcha.yescaptcha_client_key", "") or None
     if captcha_mode == "yescaptcha" and not yescaptcha_client_key:
         raise ValueError("captcha.yescaptcha_client_key is required when captcha.mode = 'yescaptcha'")
@@ -275,6 +276,10 @@ def load_config() -> AppConfig:
     # classify 模式 checkbox 点击是否加贝塞尔真人轨迹。普通 chromium 需 True；
     # camoufox(humanize=True) 浏览器内核已真人化，设 False 更快。默认 True。
     classify_humanize = _get_bool(data, "captcha.classify_humanize", True)
+
+    browser_engine = _get_str(data, "browser.engine", "camoufox").lower()
+    if browser_engine not in {"camoufox", "chromium"}:
+        raise ValueError("browser.engine must be 'camoufox' or 'chromium'")
 
     return AppConfig(
         email_provider=email_provider,
@@ -320,6 +325,7 @@ def load_config() -> AppConfig:
         browser=BrowserConfig(
             headless=_get_bool(data, "browser.headless", False),
             close_delay_seconds=_get_int(data, "browser.close_delay_seconds", 10),
+            engine=browser_engine,
         ),
     )
 
@@ -343,5 +349,6 @@ def describe_config(config: AppConfig) -> None:
     print(f"  EMAIL_API:      {email_api}")
     print(f"  EMAIL_DOMAIN:   {email_domain}")
     print(f"  CAPTCHA_MODE:   {config.captcha.mode}")
+    print(f"  BROWSER_ENGINE: {config.browser.engine}")
     print(f"  OUTPUT_CSV:     {config.nvidia.output_csv}")
     print(f"  CONFIG_FILE:    {CONFIG_FILE}")
