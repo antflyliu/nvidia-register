@@ -32,6 +32,17 @@ from playwright.async_api import (
     async_playwright,
 )
 
+# camoufox（firefox 内核）可选依赖：engine=camoufox 时必需，产生 isTrusted 鼠标
+# 事件以过 hCaptcha checkbox 自动化检测（普通 chromium 的 page.mouse.click 事件
+# isTrusted=false，hCaptcha 判定为机器人返回 display-error）。engine=chromium 时
+# 不需要，import 失败降级为 None 由 _launch_browser 据此报错。
+try:
+    from camoufox.async_api import AsyncNewBrowser as _camoufox_new_browser
+    from camoufox.addons import DefaultAddons as _CamoufoxDefaultAddons
+except ImportError:  # pragma: no cover — camoufox 未装且 engine=chromium 时正常
+    _camoufox_new_browser = None
+    _CamoufoxDefaultAddons = None
+
 from config import AppConfig, describe_config, init_config, load_config
 from captcha import build_captcha_solver, reset_captcha_state, start_capturing_sitekey
 from email_providers import TempEmailProvider, build_email_provider, finalize_inbox
@@ -151,6 +162,39 @@ async def run(config: AppConfig, count: int = 1) -> None:
     print(f"完成! 成功: {success_count}, 失败: {fail_count}, 总计: {success_count + fail_count}")
     print("=" * 60)
 
+async def _launch_browser(p, config: AppConfig):
+    """根据 config.browser.engine 启动浏览器。
+
+    camoufox（默认，推荐）：firefox 内核产生 isTrusted 鼠标事件，过 hCaptcha checkbox
+    自动化检测。对齐 prototype/step3_full_solve_verify.py 的 AsyncCamoufox 用法，
+    但用 AsyncNewBrowser(p, ...) 复用外层 async_playwright() 实例（多账号循环不起
+    多个 playwright 进程）。humanize=True 让内核拟人化鼠标移动。
+    chromium：降级路径，camoufox 未装或显式选 chromium 时用。普通 chromium 的
+    page.mouse.click 事件 isTrusted=false，hCaptcha 会 display-error 拒给挑战。
+    """
+    engine = config.browser.engine
+    if engine == "camoufox":
+        if _camoufox_new_browser is None:
+            raise RuntimeError(
+                "browser.engine='camoufox' 但 camoufox 未安装。"
+                "请 `pip install camoufox` 并 `python -m camoufox fetch` 安装浏览器内核，"
+                "或改 config.toml [browser] engine='chromium' 降级。"
+            )
+        # humanize=True：内核级鼠标移动拟人化。ClassifySolver 的贝塞尔轨迹
+        # （captcha.classify_humanize）在 camoufox 下应设 false（内核已 humanize）。
+        # exclude_addons 禁用 UBO：camoufox 默认从 mozilla.org 下载 uBlock Origin，
+        # 国内网络常下载失败（InvalidAddonPath: manifest.json is missing）导致启动
+        # 崩溃。UBO 对 hCaptcha 求解无必要，禁用保证稳健启动。
+        exclude = [_CamoufoxDefaultAddons.UBO] if _CamoufoxDefaultAddons else None
+        return await _camoufox_new_browser(
+            p, headless=config.browser.headless, humanize=config.captcha.classify_humanize, exclude_addons=exclude,
+        )
+    # chromium 降级
+    return await p.chromium.launch(
+        headless=config.browser.headless,
+        args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+    )
+
 async def _register_one(
     p,
     config: AppConfig,
@@ -160,10 +204,7 @@ async def _register_one(
     """单个账号的完整注册流程。返回 api_key 或 None。"""
     password = generate_password(12)
     reset_captcha_state()  # 重置 sitekey 缓存，确保每个账号独立
-    browser = await p.chromium.launch(
-        headless=config.browser.headless,
-        args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-    )
+    browser = await _launch_browser(p, config)
     page = await browser.new_page(viewport={"width": 1280, "height": 800})
 
     inbox = None
