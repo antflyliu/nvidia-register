@@ -474,6 +474,8 @@ _SUBMIT_BUTTON_XPATH = "//div[@class='button-submit button']"
 _WAIT_IFRAME_SEC = 30
 _WAIT_RENDER_SEC = 15
 _WAIT_IMAGE_SEC = 15
+# 多轮挑战最大轮数（对齐库 MAX_CRUMB_COUNT 默认 2，留余量覆盖 3 轮 + 失败重试）。
+_MAX_CHALLENGE_ROUNDS = 4
 
 
 def _bezier_trajectory(start: tuple[float, float], end: tuple[float, float],
@@ -549,38 +551,17 @@ class ClassifySolver:
             print("  failed to trigger challenge via checkbox, fallback local")
             return await self._fallback_local(page)
 
-        # 1) 取图 + 问句
-        challenge = await self._capture_challenge(page)
-        if challenge is None:
-            print("  no challenge frame surfaced")
-            return False
-
-        # 2) bbox 直接 fallback（classify 不支持 bbox；drag 已支持）
-        if challenge.get("captcha_type") == "bbox":
-            print("  bbox unsupported by classify, fallback local")
-            return await self._fallback_local(page)
-
-        # 3) 调自建判图服务
-        answer = self._classify(challenge)
-        if answer is None:
-            print("  classify returned unsupported or failed, fallback local")
-            return await self._fallback_local(page)
-
-        print(f"  [classify] answer = {answer}")
-
-        # 4) 客户端回填点击 + 提交（阶段 3 Step 2 实现，当前 stub 不真点）
-        ok = await self._apply_answer(page, challenge, answer)
-        if not ok:
-            print("  apply_answer failed, fallback local")
-            return await self._fallback_local(page)
-
-        # 5) 等 token 注入，检查按钮使能
-        token = await self._wait_hcaptcha_token(page)
+        # 1-4) 多轮挑战循环：hCaptcha drag/point/grid 可能要求连续通过多轮
+        # （库 MAX_CRUMB_COUNT 默认 2）。每轮：取图→判图→回填→提交，提交后等
+        # /getcaptcha/ 或 /checkcaptcha/ 的 pass 响应。pass 则拿到 token 退出；
+        # 未 pass 则 hCaptcha 刷新下一轮挑战，继续循环。
+        token = await self._solve_rounds(page)
         if not token:
-            return False
+            print("  classify solver failed all rounds, fallback local")
+            return await self._fallback_local(page)
 
+        # 5) 注入 token，检查注册按钮使能
         await self._inject_hcaptcha_token(page, token)
-
         for i in range(20):
             if await _is_register_button_enabled(page):
                 print(f"  hCaptcha solved by classify solver ({i}s)")
@@ -589,6 +570,67 @@ class ClassifySolver:
 
         print("  hCaptcha token injected, but #register_button stayed disabled")
         return False
+
+    async def _solve_rounds(self, page: Page) -> str | None:
+        """多轮挑战循环：每轮取图→判图→回填→提交，直到拿到 pass token 或超上限。
+
+        hCaptcha 多轮机制（对齐库 challenge_image_drag_drop 的 for cid in
+        range(crumb_count)）：每轮独立 submit，全部通过后 /getcaptcha/ 返回
+        pass=true + generated_pass_UUID。_on_response 已捕获到 _captured_token，
+        每轮提交后轮询；未 pass 则等下一轮挑战刷新，继续取图。
+        """
+        deadline = time.time() + self.timeout_seconds
+        for rnd in range(1, _MAX_CHALLENGE_ROUNDS + 1):
+            if time.time() > deadline:
+                print("  [classify] rounds timeout")
+                break
+            print(f"  [classify] === round {rnd}/{_MAX_CHALLENGE_ROUNDS} ===")
+
+            # 取图（第 2 轮起要等新挑战刷新渲染）
+            if rnd > 1:
+                await asyncio.sleep(1.5)  # 等下一轮挑战刷新
+                self._captured_challenge_js = None  # 新轮 challenge.js 可能不同
+            challenge = await self._capture_challenge(page)
+            if challenge is None:
+                print("  no challenge frame surfaced")
+                return None
+
+            # bbox 不支持，fallback
+            if challenge.get("captcha_type") == "bbox":
+                print("  bbox unsupported by classify")
+                return None
+
+            # 判图
+            answer = self._classify(challenge)
+            if answer is None:
+                print("  classify returned unsupported or failed")
+                return None
+            print(f"  [classify] answer = {answer}")
+
+            # 回填 + 提交
+            ok = await self._apply_answer(page, challenge, answer)
+            if not ok:
+                print("  apply_answer failed")
+                return None
+
+            # 等本轮 pass token（短等：pass 了就退出，没 pass 等下一轮）
+            token = await self._wait_token_brief()
+            if token:
+                return token
+            print("  [classify] no pass this round, continue next round")
+
+        print("  [classify] exhausted all rounds without pass")
+        return None
+
+    async def _wait_token_brief(self, timeout: float = 15.0) -> str | None:
+        """短等 pass token（单轮提交后）。pass → 返回 token；超时 → None（继续下一轮）。"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._captured_token:
+                print(f"  [classify] hCaptcha pass, token len={len(self._captured_token)}")
+                return self._captured_token
+            await asyncio.sleep(0.5)
+        return None
 
     async def _click_checkbox(self, page: Page) -> bool:
         """点 hCaptcha checkbox 弹出挑战框（ClassifySolver 独有，现有 solver 不需要）。
@@ -614,9 +656,10 @@ class ClassifySolver:
             if not self._captured_challenge_js:
                 if "/challenge/" in url and url.endswith("/challenge.js"):
                     self._captured_challenge_js = url
-            # hCaptcha 验证通过 → /getcaptcha/ 响应 {pass:true, generated_pass_UUID:...}
-            # 对齐库 challenger.py:723-734。token 只取首个 pass 响应。
-            if not self._captured_token and "/getcaptcha/" in url:
+            # hCaptcha 验证通过 → /getcaptcha/ 或 /checkcaptcha/ 响应 {pass:true,
+            # generated_pass_UUID:...}。对齐库 challenger.py:723-734 + 783-788
+            # （两个端点都可能返回 pass 结果）。token 只取首个 pass 响应。
+            if not self._captured_token and ("/getcaptcha/" in url or "/checkcaptcha/" in url):
                 try:
                     ctype = resp.headers.get("content-type", "")
                     if "json" in ctype:
@@ -1078,22 +1121,6 @@ class ClassifySolver:
         except Exception as exc:
             print(f"  [classify] submit failed: {exc}")
             return False
-
-    async def _wait_hcaptcha_token(self, page: Page) -> str | None:
-        """等 hCaptcha 验证通过，从 /getcaptcha/ 响应取 generated_pass_UUID。
-
-        对齐库 challenger.py wait_for_challenge：回填提交后 hCaptcha 发 /getcaptcha/
-        验证，pass=true 时响应含 generated_pass_UUID（P1_eyJ0...）。_on_response 已
-        捕获到 self._captured_token，这里轮询至超时。
-        """
-        deadline = time.time() + self.timeout_seconds
-        while time.time() < deadline:
-            if self._captured_token:
-                print(f"  [classify] hCaptcha pass, token len={len(self._captured_token)}")
-                return self._captured_token
-            await asyncio.sleep(0.5)
-        print("  [classify] timed out waiting for hCaptcha pass")
-        return None
 
     async def _inject_hcaptcha_token(self, page: Page, token: str):
         """注入 token 到 textarea[name="h-captcha-response"]（已有实现，直接复用）。"""
