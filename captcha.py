@@ -595,6 +595,13 @@ class ClassifySolver:
                 print("  no challenge frame surfaced")
                 return None
 
+            # round 1 诊断：读 hCaptcha 预设的 Crumb 数（多轮指示器，对齐库
+            # check_crumb_count）。单轮=1，多轮=2+。确认 hCaptcha 实际给几轮。
+            if rnd == 1:
+                crumb_n = await self._read_crumb_count(page)
+                print(f"  [classify] hCaptcha crumb_count = {crumb_n} "
+                      f"({'多轮' if crumb_n > 1 else '单轮'})")
+
             # bbox 不支持，fallback
             if challenge.get("captcha_type") == "bbox":
                 print("  bbox unsupported by classify")
@@ -621,6 +628,22 @@ class ClassifySolver:
 
         print("  [classify] exhausted all rounds without pass")
         return None
+
+    async def _read_crumb_count(self, page: Page) -> int:
+        """读 hCaptcha 挑战框 .Crumb 元素数（多轮指示器，对齐库 check_crumb_count）。
+
+        hCaptcha 用 .Crumb 元素指示挑战轮数（像分页器圆点）。单轮=1 个或无，
+        多轮=2+ 个。库 check_crumb_count（challenger.py:417-430）同逻辑。
+        诊断用：确认 hCaptcha 实际给几轮，判断多轮循环是否可实测。
+        """
+        try:
+            fr = await self._find_challenge_frame(page)
+            if fr is None:
+                return 1
+            count = await fr.locator("//div[@class='Crumb']").count()
+            return count if count else 1
+        except Exception:
+            return 1
 
     async def _wait_token_brief(self, timeout: float = 15.0) -> str | None:
         """短等 pass token（单轮提交后）。pass → 返回 token；超时 → None（继续下一轮）。"""

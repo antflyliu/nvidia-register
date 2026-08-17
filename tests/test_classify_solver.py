@@ -81,6 +81,100 @@ class ClassifySolverFallbackTests(unittest.TestCase):
         fallback.assert_awaited_once()
 
 
+class ClassifySolverMultiRoundTests(unittest.TestCase):
+    """_solve_rounds 多轮循环逻辑（不依赖真机 hCaptcha）。
+
+    hCaptcha 多轮机制：全部轮通过才返回 pass token。mock _capture_challenge
+    返回多轮挑战 + _wait_token_brief 第 1 轮返回 None（未 pass）第 2 轮返回
+    token（pass），验证循环推进 + 退出逻辑。
+    """
+
+    def setUp(self) -> None:
+        reset_captcha_state()
+
+    def _make_solver(self) -> ClassifySolver:
+        return ClassifySolver(
+            api_url="http://127.0.0.1:5072",
+            poll_interval_seconds=0,
+            timeout_seconds=30,
+            local_solver_url="http://127.0.0.1:5072",
+        )
+
+    def test_multi_round_passes_on_round_2(self) -> None:
+        """2 轮挑战：round 1 未 pass，round 2 pass → 拿 token，注入成功。"""
+        solver = self._make_solver()
+        solver._click_checkbox = mock.AsyncMock(return_value=True)  # type: ignore[method-assign]
+        # _capture_challenge 每轮返回 drag 挑战（含 bbox 字段）
+        challenge = {
+            "captcha_type": "drag",
+            "queries": ["fake_b64"],
+            "question": "Drag the shape",
+            "bbox_x": 100.0, "bbox_y": 100.0,
+            "grid_w": 500, "grid_h": 469,
+        }
+        solver._capture_challenge = mock.AsyncMock(return_value=challenge)  # type: ignore[method-assign]
+        solver._read_crumb_count = mock.AsyncMock(return_value=2)  # type: ignore[method-assign]
+        solver._classify = mock.Mock(return_value=[[10, 20, 30, 40]])  # type: ignore[method-assign]
+        solver._apply_answer = mock.AsyncMock(return_value=True)  # type: ignore[method-assign]
+        # round 1 未 pass（None），round 2 pass（token）
+        solver._wait_token_brief = mock.AsyncMock(side_effect=[None, "fake-token-2443"])  # type: ignore[method-assign]
+        solver._inject_hcaptcha_token = mock.AsyncMock(return_value=True)  # type: ignore[method-assign]
+        # 注册按钮第 1 次检查就 enable
+        with mock.patch.object(captcha_mod, "_is_register_button_enabled",
+                               new=mock.AsyncMock(side_effect=[True])):
+            page = FakePage()
+            ok = asyncio.run(solver.solve(page))
+        self.assertTrue(ok)
+        # _apply_answer 被调 2 次（2 轮），_wait_token_brief 被调 2 次
+        self.assertEqual(solver._apply_answer.await_count, 2)
+        self.assertEqual(solver._wait_token_brief.await_count, 2)
+        solver._inject_hcaptcha_token.assert_awaited_once_with(page, "fake-token-2443")
+
+    def test_single_round_passes_on_round_1(self) -> None:
+        """单轮挑战：round 1 就 pass → 不进 round 2。"""
+        solver = self._make_solver()
+        solver._click_checkbox = mock.AsyncMock(return_value=True)  # type: ignore[method-assign]
+        challenge = {
+            "captcha_type": "drag", "queries": ["fake_b64"], "question": "Drag",
+            "bbox_x": 100.0, "bbox_y": 100.0, "grid_w": 500, "grid_h": 469,
+        }
+        solver._capture_challenge = mock.AsyncMock(return_value=challenge)  # type: ignore[method-assign]
+        solver._read_crumb_count = mock.AsyncMock(return_value=1)  # type: ignore[method-assign]
+        solver._classify = mock.Mock(return_value=[[10, 20, 30, 40]])  # type: ignore[method-assign]
+        solver._apply_answer = mock.AsyncMock(return_value=True)  # type: ignore[method-assign]
+        # round 1 直接 pass
+        solver._wait_token_brief = mock.AsyncMock(return_value="fake-token-2443")  # type: ignore[method-assign]
+        solver._inject_hcaptcha_token = mock.AsyncMock(return_value=True)  # type: ignore[method-assign]
+        with mock.patch.object(captcha_mod, "_is_register_button_enabled",
+                               new=mock.AsyncMock(side_effect=[True])):
+            ok = asyncio.run(solver.solve(FakePage()))
+        self.assertTrue(ok)
+        # 只 1 轮：_apply_answer 和 _wait_token_brief 各调 1 次
+        self.assertEqual(solver._apply_answer.await_count, 1)
+        self.assertEqual(solver._wait_token_brief.await_count, 1)
+
+    def test_all_rounds_fail_triggers_fallback(self) -> None:
+        """所有轮都未 pass → _solve_rounds 返回 None → fallback local。"""
+        solver = self._make_solver()
+        solver._click_checkbox = mock.AsyncMock(return_value=True)  # type: ignore[method-assign]
+        challenge = {"captcha_type": "drag", "queries": ["fake_b64"], "question": "Drag",
+                      "bbox_x": 100.0, "bbox_y": 100.0, "grid_w": 500, "grid_h": 469}
+        solver._capture_challenge = mock.AsyncMock(return_value=challenge)  # type: ignore[method-assign]
+        solver._read_crumb_count = mock.AsyncMock(return_value=2)  # type: ignore[method-assign]
+        solver._classify = mock.Mock(return_value=[[10, 20, 30, 40]])  # type: ignore[method-assign]
+        solver._apply_answer = mock.AsyncMock(return_value=True)  # type: ignore[method-assign]
+        # 所有轮都未 pass
+        solver._wait_token_brief = mock.AsyncMock(return_value=None)  # type: ignore[method-assign]
+        fallback = mock.AsyncMock(return_value=True)
+        solver._fallback_local = fallback  # type: ignore[method-assign]
+        ok = asyncio.run(solver.solve(FakePage()))
+        self.assertTrue(ok)
+        # 跑满 _MAX_CHALLENGE_ROUNDS 轮后 fallback
+        from captcha import _MAX_CHALLENGE_ROUNDS
+        self.assertEqual(solver._apply_answer.await_count, _MAX_CHALLENGE_ROUNDS)
+        fallback.assert_awaited_once()
+
+
 class ClassifySolverBuildTests(unittest.TestCase):
     def test_build_classify_solver_routes_to_ClassifySolver(self) -> None:
         from config import CaptchaConfig
