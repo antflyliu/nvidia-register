@@ -204,6 +204,12 @@ async def _register_one(
     """单个账号的完整注册流程。返回 api_key 或 None。"""
     password = generate_password(12)
     reset_captcha_state()  # 重置 sitekey 缓存，确保每个账号独立
+    # ClassifySolver 实例全批共用（run() 只 build 一次），需每账号清空其
+    # challenge.js 捕获列表，避免账号 A 的类型串到账号 B。其它 solver 模式
+    # 无此方法，hasattr 守卫兼容。
+    reset_challenge = getattr(captcha_solver, "reset_challenge_state", None)
+    if reset_challenge is not None:
+        reset_challenge()
     browser = await _launch_browser(p, config)
     page = await browser.new_page(viewport={"width": 1280, "height": 800})
 
