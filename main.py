@@ -538,7 +538,7 @@ async def register_account(
 
         # 点"继续"提交验证码
         await _click_continue(page)
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)
 
         # 检查是否有错误提示（验证码无效）
         if await _has_verification_code_error(page):
