@@ -538,7 +538,7 @@ async def register_account(
 
         # 点"继续"提交验证码
         await _click_continue(page)
-        await asyncio.sleep(2)
+        await asyncio.sleep(3)
 
         # 检查是否有错误提示（验证码无效）
         if await _has_verification_code_error(page):
@@ -588,6 +588,12 @@ async def _wait_for_verification_code_email(
 # hCaptcha token 被后端拒绝时的重试次数（每次都会重新求解一个新 token）
 CAPTCHA_SUBMIT_ATTEMPTS = 3
 VERIFICATION_CODE_ATTEMPTS = 3
+# select-account（cloudaccounts.nvidia.com）页连续填组织名失败几次后触发刷新/重进。
+# 真机实测：该跳是 NVIDIA 链最重一跳，常缓慢或卡白屏（DOM 未渲染 _create_org 即返回
+# False）。盲 sleep(4) 循环会一直打「创建组织页：填组织名...」直到阶段C超时——见
+# specs/bugfixes/select-account-recovery。连续失败到阈值则先 page.reload()，仍失败则
+# page.goto(build.nvidia.com) 让 NGC user-context 探测接回（复用 _recover）。
+_SELECT_ACCOUNT_RELOAD_AFTER = 3
 
 # 仅重试点 #register_button（不换 token）的次数。用于 no_response 分支：
 # 45s 没等到 user/register 请求，多半是这次点击没真正触发提交（按钮被遮罩
@@ -1060,8 +1066,11 @@ async def finalize_and_create_key(page: Page, config: AppConfig) -> str | None:
       → complete-profile(session 已有效, 直接建 key)
     """
     log.info("[阶段C] 处理注册后跳转，直到 session 有效...")
-    deadline = time.time() + 240
+    deadline = time.time() + 300
     last_url = ""
+    # select-account 连续填组织名失败计数（每账号独立）。失败到阈值触发刷新/重进，
+    # 避免页面卡加载时死循环「创建组织页：填组织名...」直到阶段C超时。成功后清零。
+    sa_fail_streak = 0
 
     while time.time() < deadline:
         # 每轮先尝试直接建 key（session 可能已经有效）
@@ -1096,8 +1105,28 @@ async def finalize_and_create_key(page: Page, config: AppConfig) -> str | None:
         # 创建组织页（利用组织名跳过手机验证）
         if "select-account" in url_now or "cloudaccounts.nvidia.com" in url_now:
             log.info("创建组织页：填组织名...")
-            await _create_org(page, config.nvidia.account_name)
-            await asyncio.sleep(4)
+            ok = await _create_org(page, config.nvidia.account_name)
+            if ok:
+                sa_fail_streak = 0
+                await asyncio.sleep(4)
+                continue
+            # _create_org 返回 False = 表单还没渲染出来（页面卡加载/白屏）。不能盲等，
+            # 否则死循环「创建组织页：填组织名...」直到阶段C超时。连续失败达阈值触发恢复。
+            sa_fail_streak += 1
+            log.warning("创建组织页表单未就绪 (连续 %d 次失败)", sa_fail_streak)
+            if sa_fail_streak < _SELECT_ACCOUNT_RELOAD_AFTER:
+                await asyncio.sleep(4)
+                continue
+            # 达阈值：刷新当前页让 select-account 重新加载表单。
+            if await _recover_from_navigation_error(page):
+                log.warning("创建组织页 reload 成功，继续重试填组织名")
+            else:
+                # reload 也救不回 → 重新进 build.nvidia.com 让 NGC user-context 接回流程
+                log.warning("创建组织页 reload 失败，重进 build.nvidia.com 让流程接回")
+                await _recover_from_navigation_error(page)
+            # 恢复动作后不立即重填，让页面有时间渲染；下一轮由 URL 判断重新进入分支。
+            last_url = ""
+            await asyncio.sleep(3)
             continue
 
         # consent 页 → 点提交
