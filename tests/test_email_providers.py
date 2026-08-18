@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import sys
 import tempfile
 import unittest
@@ -59,6 +58,9 @@ def _app_config(provider: str = "outlook_email", **outlook_overrides) -> AppConf
             captcharun_token=None,
             captcharun_api_url="https://api.captcha-run.com",
             local_solver_url="http://127.0.0.1:5072",
+            classify_solver_url="http://127.0.0.1:5072",
+            classify_humanize=True,
+            classify_fallback_local=False,
             poll_interval_seconds=3,
             timeout_seconds=180,
         ),
@@ -68,7 +70,7 @@ def _app_config(provider: str = "outlook_email", **outlook_overrides) -> AppConf
             account_name="NVIDIA Build",
             key_expiry_date="2126-05-08T08:00:00Z",
         ),
-        browser=BrowserConfig(headless=False, close_delay_seconds=5),
+        browser=BrowserConfig(headless=False, close_delay_seconds=5, engine="chromium"),
     )
 
 
@@ -231,10 +233,11 @@ class OutlookEmailProviderTests(unittest.TestCase):
 
 class ConfigDescribeTests(unittest.TestCase):
     def test_describe_outlook_config(self):
-        buf = io.StringIO()
-        with patch("sys.stdout", buf):
+        # describe_config 现走 logger（log.info），不再 print 到 stdout；
+        # 用 assertLogs 捕获 nvidia-register logger 输出。
+        with self.assertLogs("nvidia-register", level="INFO") as cm:
             describe_config(_app_config("outlook_email"))
-        output = buf.getvalue()
+        output = "\n".join(cm.output)
         self.assertIn("EMAIL_PROVIDER: outlook_email", output)
         self.assertIn("http://127.0.0.1:5000", output)
 
