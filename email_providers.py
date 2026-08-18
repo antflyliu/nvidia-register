@@ -11,6 +11,9 @@ from urllib.parse import quote, urlencode
 import requests
 
 from config import AppConfig, CloudflareTempEmailConfig, DuckMailConfig, OutlookEmailConfig
+from logging_setup import get_logger
+
+log = get_logger("email")
 
 
 @dataclass(frozen=True)
@@ -71,7 +74,7 @@ class CloudflareTempEmailProvider:
                     if code:
                         return code
             except Exception as exc:
-                print(f"  email poll: {exc}", flush=True)
+                log.warning("cloudflare email poll: %s", exc)
             time.sleep(5) # 2 -> 5
         return None
 
@@ -134,7 +137,7 @@ class DuckMailProvider:
                     if code:
                         return code
             except Exception as exc:
-                print(f"  email poll: {exc}", flush=True)
+                log.warning("duckmail email poll: %s", exc)
             time.sleep(2)
         return None
 
@@ -163,7 +166,7 @@ class OutlookEmailProvider:
         for account in candidates:
             email = str(account.get("email") or "").strip()
             if self.config.skip_disabled and self._is_disabled(email):
-                print(f"  skip disabled outlook account: {email}", flush=True)
+                log.info("skip disabled outlook account: %s", email)
                 continue
             chosen = account
             break
@@ -192,16 +195,16 @@ class OutlookEmailProvider:
                 for mail in emails:
                     code = _extract_verification_code(_outlook_message_body(mail))
                     if code:
-                        print(f"  outlook otp from {mail.get('subject') or 'mail'}: {code}", flush=True)
+                        log.info("outlook otp from %s: %s", mail.get("subject") or "mail", code)
                         return code
                 if emails:
                     subjects = ", ".join((mail.get("subject") or "(no subject)") for mail in emails[:3])
-                    print(f"  email poll: {len(emails)} mail(s) matched filters, no code yet [{subjects}]", flush=True)
+                    log.info("email poll: %d mail(s) matched filters, no code yet [%s]", len(emails), subjects)
                 elif not logged_empty:
-                    print("  email poll: 0 mail(s) after local filters", flush=True)
+                    log.info("email poll: 0 mail(s) after local filters")
                     logged_empty = True
             except Exception as exc:
-                print(f"  email poll: {exc}", flush=True)
+                log.warning("outlook email poll: %s", exc)
             time.sleep(2)
         return None
 
@@ -256,7 +259,7 @@ class OutlookEmailProvider:
                 return bool(results[0].get("disabled"))
             return bool(data.get("disabled"))
         except Exception as exc:
-            print(f"  outlook disabled-check: {exc}", flush=True)
+            log.warning("outlook disabled-check: %s", exc)
             return False
 
     def _move_account(self, email: str, account_id: object, target_group_id: int, label: str) -> None:
@@ -281,11 +284,11 @@ class OutlookEmailProvider:
             response.raise_for_status()
             data = response.json()
             if data.get("success") is False:
-                print(f"  outlook move [{label}] failed: {data.get('error') or data}", flush=True)
+                log.error("outlook move [%s] failed: %s", label, data.get("error") or data)
                 return
-            print(f"  outlook move [{label}] {email} -> group {target_group_id}", flush=True)
+            log.info("outlook move [%s] %s -> group %s", label, email, target_group_id)
         except Exception as exc:
-            print(f"  outlook move [{label}] failed: {exc}", flush=True)
+            log.error("outlook move [%s] failed: %s", label, exc)
 
     def _get_json(self, path: str, params: dict[str, str | int] | None = None) -> dict:
         url = self._url(path)

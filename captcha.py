@@ -14,6 +14,9 @@ import requests
 from playwright.async_api import Page
 
 from config import CaptchaConfig
+from logging_setup import get_logger
+
+log = get_logger("captcha")
 
 
 class CaptchaSolver(Protocol):
@@ -23,13 +26,13 @@ class CaptchaSolver(Protocol):
 
 class ManualCaptchaSolver:
     async def solve(self, page: Page) -> bool:
-        print("\n[2/4] Please solve the hCaptcha manually...")
+        log.info("\n[2/4] Please solve the hCaptcha manually...")
         for i in range(120):
             if await _is_register_button_enabled(page):
-                print(f"  hCaptcha solved ({i}s)")
+                log.info(f"  hCaptcha solved ({i}s)")
                 return True
             await asyncio.sleep(1)
-        print("  hCaptcha timeout")
+        log.warning("  hCaptcha timeout")
         return False
 
 
@@ -41,10 +44,10 @@ class YesCaptchaSolver:
     timeout_seconds: int
 
     async def solve(self, page: Page) -> bool:
-        print("\n[2/4] Solving hCaptcha with YesCaptcha...")
+        log.info("\n[2/4] Solving hCaptcha with YesCaptcha...")
         site_key = await _get_site_key(page)
         if not site_key:
-            print("  hCaptcha sitekey not found")
+            log.warning("  hCaptcha sitekey not found")
             return False
 
         task_id = self._create_task(page.url, site_key)
@@ -55,10 +58,10 @@ class YesCaptchaSolver:
         await _inject_hcaptcha_token(page, token)
         for i in range(20):
             if await _is_register_button_enabled(page):
-                print(f"  hCaptcha solved by YesCaptcha ({i}s)")
+                log.info(f"  hCaptcha solved by YesCaptcha ({i}s)")
                 return True
             await asyncio.sleep(1)
-        print("  hCaptcha token injected, but #register_button stayed disabled")
+        log.info("  hCaptcha token injected, but #register_button stayed disabled")
         return False
 
     def _create_task(self, website_url: str, website_key: str) -> str:
@@ -94,18 +97,18 @@ class YesCaptchaSolver:
                 data = response.json()
             except requests.RequestException as exc:
                 # 网络抖动不该让整个任务失败，继续轮询到超时为止
-                print(f"  YesCaptcha getTaskResult network error: {exc}")
+                log.error(f"  YesCaptcha getTaskResult network error: {exc}")
                 time.sleep(self.poll_interval_seconds)
                 continue
 
             if data.get("errorId"):
-                print(f"  YesCaptcha getTaskResult failed: {data}")
+                log.warning(f"  YesCaptcha getTaskResult failed: {data}")
                 return None
             if data.get("status") == "ready":
                 solution = data.get("solution") or {}
                 return solution.get("gRecaptchaResponse") or solution.get("token")
             time.sleep(self.poll_interval_seconds)
-        print("  YesCaptcha timeout")
+        log.warning("  YesCaptcha timeout")
         return None
 
 
@@ -117,10 +120,10 @@ class CaptchaRunSolver:
     timeout_seconds: int
 
     async def solve(self, page: Page) -> bool:
-        print("\n[2/4] Solving hCaptcha with CaptchaRun...")
+        log.info("\n[2/4] Solving hCaptcha with CaptchaRun...")
         site_key = await _get_site_key(page)
         if not site_key:
-            print("  hCaptcha sitekey not found")
+            log.warning("  hCaptcha sitekey not found")
             return False
 
         user_agent = await page.evaluate("() => navigator.userAgent")
@@ -133,10 +136,10 @@ class CaptchaRunSolver:
         await _inject_hcaptcha_token(page, token)
         for i in range(20):
             if await _is_register_button_enabled(page):
-                print(f"  hCaptcha solved by CaptchaRun ({i}s)")
+                log.info(f"  hCaptcha solved by CaptchaRun ({i}s)")
                 return True
             await asyncio.sleep(1)
-        print("  hCaptcha token injected, but #register_button stayed disabled")
+        log.info("  hCaptcha token injected, but #register_button stayed disabled")
         return False
 
     def _create_task(self, website_url: str, website_key: str, user_agent: str) -> tuple[str | None, str | None]:
@@ -172,17 +175,17 @@ class CaptchaRunSolver:
             )
             data = _response_json(response)
             if not response.ok:
-                print(f"  CaptchaRun get task result failed: {data}")
+                log.warning(f"  CaptchaRun get task result failed: {data}")
                 return None
 
             status = str(data.get("status", "")).lower()
             if status == "success":
                 return _extract_hcaptcha_token(data.get("response") or data.get("result") or {})
             if status == "fail":
-                print(f"  CaptchaRun failed: {data.get('reason') or data}")
+                log.warning(f"  CaptchaRun failed: {data.get('reason') or data}")
                 return None
             time.sleep(self.poll_interval_seconds)
-        print("  CaptchaRun timeout")
+        log.warning("  CaptchaRun timeout")
         return None
 
     def _headers(self, content_type: bool = True) -> dict[str, str]:
@@ -209,10 +212,10 @@ class LocalSolver:
     timeout_seconds: int
 
     async def solve(self, page: Page) -> bool:
-        print("\n[2/4] Solving hCaptcha with local camoufox-turnstile...")
+        log.info("\n[2/4] Solving hCaptcha with local camoufox-turnstile...")
         site_key = await _get_site_key(page)
         if not site_key:
-            print("  hCaptcha sitekey not found")
+            log.warning("  hCaptcha sitekey not found")
             return False
 
         user_agent = await page.evaluate("() => navigator.userAgent")
@@ -222,23 +225,23 @@ class LocalSolver:
         cookies: list[dict[str, Any]] = [dict(c) for c in raw_cookies]
         # 本地化日志：每次 createTask 都打印一条，带上 websiteURL 片段，便于
         # 与服务端 `hcaptcha solve.start cr=N` 日志对账「一个账号的发起了几次求解」。
-        print(f"  [local-solver] createTask websiteURL={page.url[:80]} "
+        log.info(f"  [local-solver] createTask websiteURL={page.url[:80]} "
               f"sitekey={site_key[:12]}... cookies={len(cookies)}")
         task_id = self._create_task(page.url, site_key, user_agent, cookies)
-        print(f"  [local-solver] taskId={task_id} 开始轮询")
+        log.info(f"  [local-solver] taskId={task_id} 开始轮询")
         token = self._poll_task_result(task_id)
         if not token:
-            print("  [local-solver] 轮询结束，未拿到 token")
+            log.info("  [local-solver] 轮询结束，未拿到 token")
             return False
-        print(f"  [local-solver] 拿到 token len={len(str(token))}，注入页面")
+        log.info(f"  [local-solver] 拿到 token len={len(str(token))}，注入页面")
 
         await _inject_hcaptcha_token(page, token)
         for i in range(20):
             if await _is_register_button_enabled(page):
-                print(f"  hCaptcha solved by local solver ({i}s)")
+                log.info(f"  hCaptcha solved by local solver ({i}s)")
                 return True
             await asyncio.sleep(1)
-        print("  hCaptcha token injected, but #register_button stayed disabled")
+        log.info("  hCaptcha token injected, but #register_button stayed disabled")
         return False
 
     def _unreachable(self, path: str, exc: Exception) -> RuntimeError:
@@ -299,18 +302,18 @@ class LocalSolver:
             except requests.RequestException as exc:
                 # 网络抖动不该让整个任务失败，继续轮询到超时为止；但首次
                 # 连接失败（服务不可达）给出清晰提示，避免反复打印晦涩错误。
-                print(f"  local solver getTaskResult network error: {exc}")
+                log.error(f"  local solver getTaskResult network error: {exc}")
                 time.sleep(self.poll_interval_seconds)
                 continue
 
             if data.get("errorId"):
-                print(f"  local solver getTaskResult failed: {data}")
+                log.warning(f"  local solver getTaskResult failed: {data}")
                 return None
             if data.get("status") == "ready":
                 solution = data.get("solution") or {}
                 return solution.get("gRecaptchaResponse") or solution.get("token")
             time.sleep(self.poll_interval_seconds)
-        print("  local solver timeout")
+        log.warning("  local solver timeout")
         return None
 
 
@@ -342,7 +345,7 @@ def start_capturing_sitekey(page: Page) -> None:
                 sk = parse_qs(urlparse(url).query).get("sitekey", [None])[0]
                 if sk:
                     _captured_sitekey = sk
-                    print(f"  sitekey captured: {sk}")
+                    log.info(f"  sitekey captured: {sk}")
             except Exception:
                 pass
 
@@ -401,9 +404,9 @@ async def _inject_hcaptcha_token(page: Page, token: str) -> bool:
         token,
     )
     callback_invoked = bool(result.get("callbackInvoked"))
-    print(f"  token injected (callback={callback_invoked}, textarea={result.get('textareaCount')})")
+    log.info(f"  token injected (callback={callback_invoked}, textarea={result.get('textareaCount')})")
     if not callback_invoked:
-        print("  WARNING: __hCaptchaCallback 未捕获到，Angular 可能收不到 token")
+        log.info("  WARNING: __hCaptchaCallback 未捕获到，Angular 可能收不到 token")
     return callback_invoked
 
 
@@ -603,11 +606,11 @@ class ClassifySolver:
 
     async def solve(self, page: Page) -> bool:
         """与 LocalSolver.solve 完全相同的接口。"""
-        print("\n[2/4] Solving hCaptcha with classify solver...")
+        log.info("\n[2/4] Solving hCaptcha with classify solver...")
 
         # 0) 点 checkbox 弹出挑战框（ClassifySolver 独有；现有 solver 不点，靠打码平台云端点）
         if not await self._click_checkbox(page):
-            print("  failed to trigger challenge via checkbox, fallback local")
+            log.warning("  failed to trigger challenge via checkbox, fallback local")
             return await self._fallback_local(page)
 
         # 1-4) 多轮挑战循环：hCaptcha drag/point/grid 可能要求连续通过多轮
@@ -616,18 +619,18 @@ class ClassifySolver:
         # 未 pass 则 hCaptcha 刷新下一轮挑战，继续循环。
         token = await self._solve_rounds(page)
         if not token:
-            print("  classify solver failed all rounds, fallback local")
+            log.warning("  classify solver failed all rounds, fallback local")
             return await self._fallback_local(page)
 
         # 5) 注入 token，检查注册按钮使能
         await self._inject_hcaptcha_token(page, token)
         for i in range(20):
             if await _is_register_button_enabled(page):
-                print(f"  hCaptcha solved by classify solver ({i}s)")
+                log.info(f"  hCaptcha solved by classify solver ({i}s)")
                 return True
             await asyncio.sleep(1)
 
-        print("  hCaptcha token injected, but #register_button stayed disabled")
+        log.info("  hCaptcha token injected, but #register_button stayed disabled")
         return False
 
     async def _solve_rounds(self, page: Page) -> str | None:
@@ -650,7 +653,7 @@ class ClassifySolver:
         deadline = time.time() + self.timeout_seconds
         for attempt in range(1, _MAX_CHALLENGE_ROUNDS + 1):
             if time.time() > deadline:
-                print("  [classify] rounds timeout")
+                log.warning("  [classify] rounds timeout")
                 return None
 
             # attempt 2+：点 refresh 换题（对齐库 RETRY_ON_FAILURE）。不重置
@@ -663,7 +666,7 @@ class ClassifySolver:
             if attempt > 1:
                 refreshed = await self._refresh_challenge(page)
                 if not refreshed:
-                    print("  [classify] refresh failed, cannot retry")
+                    log.warning("  [classify] refresh failed, cannot retry")
                     return None
                 await asyncio.sleep(1.5)  # 等新挑战渲染（真机实测 1s 内完成）
 
@@ -671,18 +674,18 @@ class ClassifySolver:
             if challenge is None:
                 # 取图失败：attempt 1 直接退出；attempt 2+ 继续下一轮 refresh 重试。
                 if attempt == 1:
-                    print("  no challenge frame surfaced")
+                    log.info("  no challenge frame surfaced")
                     return None
-                print("  [classify] capture failed after refresh, retry next attempt")
+                log.warning("  [classify] capture failed after refresh, retry next attempt")
                 continue
 
             crumb_n = await self._read_crumb_count(page)
-            print(f"  [classify] attempt {attempt}/{_MAX_CHALLENGE_ROUNDS} "
+            log.info(f"  [classify] attempt {attempt}/{_MAX_CHALLENGE_ROUNDS} "
                   f"crumb_count={crumb_n} ({'多轮' if crumb_n > 1 else '单轮'})")
 
             # bbox 不支持
             if challenge.get("captcha_type") == "bbox":
-                print("  bbox unsupported by classify")
+                log.warning("  bbox unsupported by classify")
                 return None
 
             # 循环 crumb_n 轮：取图→判图→回填→提交（不等 pass，对齐库 for cid）
@@ -694,9 +697,9 @@ class ClassifySolver:
             token = await self._wait_token_brief()
             if token:
                 return token
-            print("  [classify] no pass after all crumbs, refresh and retry")
+            log.info("  [classify] no pass after all crumbs, refresh and retry")
 
-        print("  [classify] exhausted all attempts without pass")
+        log.warning("  [classify] exhausted all attempts without pass")
         return None
 
     async def _run_crumbs(self, page: Page, first_challenge: dict, crumb_n: int) -> bool:
@@ -707,7 +710,7 @@ class ClassifySolver:
         """
         challenge = first_challenge
         for cid in range(crumb_n):
-            print(f"  [classify] === crumb {cid + 1}/{crumb_n} ===")
+            log.debug(f"  [classify] === crumb {cid + 1}/{crumb_n} ===")
             # 第 2 轮起重新取图（等下一轮挑战渲染）
             if cid > 0:
                 await asyncio.sleep(1.5)
@@ -717,10 +720,10 @@ class ClassifySolver:
                 # challenge.js=None 走 DOM 兜底误判类型（如 point 误判 drag）。
                 challenge = await self._capture_challenge(page)
                 if challenge is None:
-                    print("  no challenge frame for crumb %d" % (cid + 1))
+                    log.info("  no challenge frame for crumb %d" % (cid + 1))
                     return False
                 if challenge.get("captcha_type") == "bbox":
-                    print("  bbox unsupported by classify")
+                    log.warning("  bbox unsupported by classify")
                     return False
 
             # 判图（LLM 偶尔超时/502，重试 2 次避免单次抖动放弃整轮）
@@ -730,17 +733,17 @@ class ClassifySolver:
                 if answer is not None:
                     break
                 if classify_attempt < 2:
-                    print(f"  classify attempt {classify_attempt} failed, retrying...")
+                    log.warning(f"  classify attempt {classify_attempt} failed, retrying...")
                     await asyncio.sleep(1.5)
             if answer is None:
-                print("  classify returned unsupported or failed (after retry)")
+                log.warning("  classify returned unsupported or failed (after retry)")
                 return False
-            print(f"  [classify] answer = {answer}")
+            log.debug(f"  [classify] answer = {answer}")
 
             # 回填 + 提交
             ok = await self._apply_answer(page, challenge, answer)
             if not ok:
-                print("  apply_answer failed")
+                log.warning("  apply_answer failed")
                 return False
         return True
 
@@ -765,7 +768,7 @@ class ClassifySolver:
         deadline = time.time() + timeout
         while time.time() < deadline:
             if self._captured_token:
-                print(f"  [classify] hCaptcha pass, token len={len(self._captured_token)}")
+                log.info(f"  [classify] hCaptcha pass, token len={len(self._captured_token)}")
                 return self._captured_token
             await asyncio.sleep(0.5)
         return None
@@ -824,15 +827,15 @@ class ClassifySolver:
             # 用 page.locator 组合 XPath 定位 iframe 内 checkbox
             await self._click_checkbox_center(page)
         except Exception as exc:
-            print(f"  [classify] click checkbox failed: {exc}")
+            log.warning(f"  [classify] click checkbox failed: {exc}")
             return False
 
         # 等挑战 iframe 出现
         fr = await self._find_challenge_frame(page)
         if fr is None:
-            print("  [classify] challenge iframe not found after clicking checkbox")
+            log.warning("  [classify] challenge iframe not found after clicking checkbox")
             return False
-        print("  [classify] challenge iframe detected")
+        log.info("  [classify] challenge iframe detected")
         return True
 
     async def _click_checkbox_center(self, page: Page) -> None:
@@ -866,7 +869,7 @@ class ClassifySolver:
             # 点击前随机停顿（真人点前会犹豫），避免点完 widget 就点的机器时序
             await asyncio.sleep(random.uniform(0.3, 0.8))
             await self._human_click(page, cx, cy, bezier=self._humanize)
-            print(f"  [classify] human-clicked checkbox at ({cx:.0f},{cy:.0f}) "
+            log.debug(f"  [classify] human-clicked checkbox at ({cx:.0f},{cy:.0f}) "
                   f"(bezier={self._humanize})")
             return
         raise RuntimeError("checkbox iframe not found within %ds" % _WAIT_IFRAME_SEC)
@@ -959,13 +962,13 @@ class ClassifySolver:
                 """() => [...document.querySelectorAll('iframe')]
                     .map(f => f.src).filter(s => s && s.includes('hcaptcha'))"""
             )
-            print("  [classify] 现有 hcaptcha iframe src:")
+            log.debug("  [classify] 现有 hcaptcha iframe src:")
             for s in iframes or []:
-                print(f"      {s[:160]}")
+                log.info(f"      {s[:160]}")
             if not iframes:
-                print("      (无——checkbox 点击后挑战框可能未弹出或已消失)")
+                log.info("      (无——checkbox 点击后挑战框可能未弹出或已消失)")
         except Exception as exc:
-            print(f"  [classify] iframe 诊断失败: {exc}")
+            log.warning(f"  [classify] iframe 诊断失败: {exc}")
 
     async def _wait_images_loaded(self, fr, detected_type: str) -> None:
         """等挑战图片加载（grid 等task-image img，point 等canvas尺寸>0+settle）。
@@ -1022,17 +1025,17 @@ class ClassifySolver:
         """
         fr = await self._find_challenge_frame(page)
         if fr is None:
-            print("  [classify] challenge iframe not found")
+            log.warning("  [classify] challenge iframe not found")
             await self._dump_hcaptcha_iframes(page)
             return None
 
         # 1) 等 challenge.js 捕获（窗口 _WAIT_CHALLENGE_JS_SEC）
         if not self._captured_challenge_js:
-            print("  [classify] waiting challenge.js ...")
+            log.debug("  [classify] waiting challenge.js ...")
             js_deadline = time.time() + _WAIT_CHALLENGE_JS_SEC
             while time.time() < js_deadline and not self._captured_challenge_js:
                 await asyncio.sleep(0.3)
-            print(f"  [classify] challenge.js = {self._captured_challenge_js!r}")
+            log.debug(f"  [classify] challenge.js = {self._captured_challenge_js!r}")
 
         # 2) 判类型：逆序遍历已捕获的 challenge.js URL，取最新能映射出已知类型的。
         # 列表按捕获顺序 append，最新的在末尾，逆序优先用当前挑战对应的类型。
@@ -1075,7 +1078,7 @@ class ClassifySolver:
                 break
             await asyncio.sleep(0.3)
         if cv is None:
-            print("  [classify] challenge-view not rendered")
+            log.info("  [classify] challenge-view not rendered")
             # 诊断：打印 challenge iframe 内 DOM 概要 + error-text，定位是
             # hCaptcha 报错（自动化检测）还是选择器不对。
             try:
@@ -1096,9 +1099,9 @@ class ClassifySolver:
                         };
                     }"""
                 )
-                print(f"  [classify] challenge iframe DOM: {json.dumps(dom, ensure_ascii=False)[:500]}")
+                log.debug(f"  [classify] challenge iframe DOM: {json.dumps(dom, ensure_ascii=False)[:500]}")
             except Exception as exc:
-                print(f"  [classify] DOM 诊断失败: {exc}")
+                log.warning(f"  [classify] DOM 诊断失败: {exc}")
             return None
 
         # 4) 等图片加载
@@ -1124,7 +1127,7 @@ class ClassifySolver:
                 # （真机实测：attempt 2 refresh 后 challenge.js=None → 误判
                 # drag → 拖拽失败）。此时报错退出，由 _solve_rounds refresh
                 # 换题重试，不赌类型。
-                print("  [classify] type unknown (challenge.js not captured, "
+                log.warning("  [classify] type unknown (challenge.js not captured, "
                       "DOM fallback failed) — refuse to guess, abort capture")
                 return None
 
@@ -1158,18 +1161,18 @@ class ClassifySolver:
         try:
             png = await cv_locator.screenshot(timeout=60000, animations="disabled")
         except Exception as exc:
-            print(f"  [classify] element screenshot failed ({exc}); fallback clip")
+            log.warning(f"  [classify] element screenshot failed ({exc}); fallback clip")
             if box and w > 0 and h > 0:
                 try:
                     png = await page.screenshot(
                         clip={"x": bbox_x, "y": bbox_y, "width": w, "height": h}
                     )
                 except Exception as exc2:
-                    print(f"  [classify] clip screenshot also failed: {exc2}")
+                    log.warning(f"  [classify] clip screenshot also failed: {exc2}")
             if png is None:
                 return None
 
-        print(f"  [classify] type={detected_type} js={challenge_js_type!r} "
+        log.info(f"  [classify] type={detected_type} js={challenge_js_type!r} "
               f"q={question!r} size={w}x{h} task_images={n_task_images}")
         return {
             "captcha_type": detected_type,
@@ -1202,7 +1205,7 @@ class ClassifySolver:
                 return None
             return data.get("answer")
         except Exception as exc:
-            print(f"  classify request failed: {exc}")
+            log.warning(f"  classify request failed: {exc}")
             return None
 
     async def _apply_answer(self, page: Page, challenge: dict[str, Any],
@@ -1227,10 +1230,10 @@ class ClassifySolver:
             elif ctype == "drag":
                 await self._apply_drag(page, answer, bbox_x, bbox_y)
             else:
-                print(f"  [classify] unknown captcha_type for apply: {ctype}")
+                log.info(f"  [classify] unknown captcha_type for apply: {ctype}")
                 return False
         except Exception as exc:
-            print(f"  [classify] apply answer failed: {exc}")
+            log.warning(f"  [classify] apply answer failed: {exc}")
             return False
 
         # 点提交按钮（对齐库 challenger.py:642-643）
@@ -1256,7 +1259,7 @@ class ClassifySolver:
             row, col = idx // 3, idx % 3
             cx = bbox_x + (col + 0.5) * cell_w
             cy = bbox_y + (row + 0.5) * cell_h
-            print(f"  [classify] grid click #{n} at ({cx:.0f},{cy:.0f})")
+            log.debug(f"  [classify] grid click #{n} at ({cx:.0f},{cy:.0f})")
             await self._human_click(page, cx, cy, bezier=self._humanize)
             await asyncio.sleep(random.uniform(0.3, 0.6))
 
@@ -1269,7 +1272,7 @@ class ClassifySolver:
             except (ValueError, TypeError, IndexError):
                 continue
             vx, vy = bbox_x + px, bbox_y + py
-            print(f"  [classify] point click at ({vx:.0f},{vy:.0f})")
+            log.debug(f"  [classify] point click at ({vx:.0f},{vy:.0f})")
             await self._human_click(page, vx, vy, bezier=self._humanize)
             await asyncio.sleep(random.uniform(0.3, 0.6))
 
@@ -1283,32 +1286,32 @@ class ClassifySolver:
                 continue
             vsx, vsy = bbox_x + sx, bbox_y + sy
             vex, vey = bbox_x + ex, bbox_y + ey
-            print(f"  [classify] drag ({vsx:.0f},{vsy:.0f}) -> ({vex:.0f},{vey:.0f})")
+            log.info(f"  [classify] drag ({vsx:.0f},{vsy:.0f}) -> ({vex:.0f},{vey:.0f})")
             await self._human_drag(page, vsx, vsy, vex, vey, bezier=self._humanize)
 
     async def _click_submit(self, page: Page) -> bool:
         """点 challenge iframe 内 .button-submit 提交（对齐库 challenger.py:642）。"""
         fr = await self._find_challenge_frame(page)
         if fr is None:
-            print("  [classify] challenge frame gone, cannot submit")
+            log.warning("  [classify] challenge frame gone, cannot submit")
             return False
         try:
             btn = fr.locator(_SUBMIT_BUTTON_XPATH)
             if await btn.count() == 0:
-                print("  [classify] submit button not found")
+                log.warning("  [classify] submit button not found")
                 return False
             box = await btn.bounding_box()
             if box is None:
-                print("  [classify] submit button not visible")
+                log.warning("  [classify] submit button not visible")
                 return False
             cx = box["x"] + box["width"] / 2
             cy = box["y"] + box["height"] / 2
             await asyncio.sleep(random.uniform(0.3, 0.8))
             await self._human_click(page, cx, cy, bezier=self._humanize)
-            print(f"  [classify] submit clicked at ({cx:.0f},{cy:.0f})")
+            log.debug(f"  [classify] submit clicked at ({cx:.0f},{cy:.0f})")
             return True
         except Exception as exc:
-            print(f"  [classify] submit failed: {exc}")
+            log.warning(f"  [classify] submit failed: {exc}")
             return False
 
     async def _refresh_challenge(self, page: Page) -> bool:
@@ -1325,25 +1328,25 @@ class ClassifySolver:
         """
         fr = await self._find_challenge_frame(page)
         if fr is None:
-            print("  [classify] challenge frame gone, cannot refresh")
+            log.warning("  [classify] challenge frame gone, cannot refresh")
             return False
         try:
             btn = fr.locator(_REFRESH_BUTTON_XPATH)
             if await btn.count() == 0:
-                print("  [classify] refresh button not found")
+                log.warning("  [classify] refresh button not found")
                 return False
             box = await btn.bounding_box()
             if box is None:
-                print("  [classify] refresh button not visible")
+                log.warning("  [classify] refresh button not visible")
                 return False
             cx = box["x"] + box["width"] / 2
             cy = box["y"] + box["height"] / 2
             await asyncio.sleep(random.uniform(0.3, 0.8))
             await self._human_click(page, cx, cy, bezier=self._humanize)
-            print(f"  [classify] refresh clicked at ({cx:.0f},{cy:.0f})")
+            log.debug(f"  [classify] refresh clicked at ({cx:.0f},{cy:.0f})")
             return True
         except Exception as exc:
-            print(f"  [classify] refresh failed: {exc}")
+            log.warning(f"  [classify] refresh failed: {exc}")
             return False
 
     async def _inject_hcaptcha_token(self, page: Page, token: str):
@@ -1360,10 +1363,10 @@ class ClassifySolver:
         memory classify-fallback-opens-browser.md。
         """
         if not self._fallback_local_enabled:
-            print("  [classify] fallback_local disabled (mode=classify 无浏览器语义)，"
+            log.warning("  [classify] fallback_local disabled (mode=classify 无浏览器语义)，"
                   "判图/回填失败，不 fallback 开浏览器，当前账号失败")
             return False
-        print("  falling back to local solver (real browser)")
+        log.info("  falling back to local solver (real browser)")
         local = LocalSolver(
             api_url=self.local_solver_url,
             poll_interval_seconds=self.poll_interval_seconds,

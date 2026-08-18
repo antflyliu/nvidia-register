@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import logging
 import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from logging_setup import get_logger
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = SCRIPT_DIR / "config.toml"
+
+# config 在 main.py load_config() 调用时被读；main.py:54 已先 setup_logging()，
+# 故此处取 logger 基建已就绪。
+log = get_logger("config")
 
 
 @dataclass(frozen=True)
@@ -141,7 +147,7 @@ def _resolve_path(value: str) -> Path:
 
 def init_config() -> None:
     if CONFIG_FILE.exists():
-        print(f"Config already exists: {CONFIG_FILE}")
+        log.info("Config already exists: %s", CONFIG_FILE)
         return
     template = """
 email_provider = "cloudflare_temp_email"
@@ -187,13 +193,13 @@ headless = false
 close_delay_seconds = 5
 """
     CONFIG_FILE.write_text(template, encoding="utf-8")
-    print(f"Created {CONFIG_FILE}")
+    log.info("Created %s", CONFIG_FILE)
 
 
 def load_config() -> AppConfig:
     if not CONFIG_FILE.exists():
-        print(f"Missing config file: {CONFIG_FILE}")
-        print("Run: python main.py --init")
+        log.error("Missing config file: %s", CONFIG_FILE)
+        log.error("Run: python main.py --init")
         sys.exit(1)
 
     with CONFIG_FILE.open("rb") as file:
@@ -351,10 +357,10 @@ def describe_config(config: AppConfig) -> None:
         email_api = config.duckmail.api_url
         email_domain = config.duckmail.domain
 
-    print(f"  EMAIL_PROVIDER: {config.email_provider}")
-    print(f"  EMAIL_API:      {email_api}")
-    print(f"  EMAIL_DOMAIN:   {email_domain}")
-    print(f"  CAPTCHA_MODE:   {config.captcha.mode}")
-    print(f"  BROWSER_ENGINE: {config.browser.engine}")
-    print(f"  OUTPUT_CSV:     {config.nvidia.output_csv}")
-    print(f"  CONFIG_FILE:    {CONFIG_FILE}")
+    log.info("  EMAIL_PROVIDER: %s", config.email_provider)
+    log.info("  EMAIL_API:      %s", email_api)
+    log.info("  EMAIL_DOMAIN:   %s", email_domain)
+    log.info("  CAPTCHA_MODE:   %s", config.captcha.mode)
+    log.info("  BROWSER_ENGINE: %s", config.browser.engine)
+    log.info("  OUTPUT_CSV:     %s", config.nvidia.output_csv)
+    log.info("  CONFIG_FILE:    %s", CONFIG_FILE)

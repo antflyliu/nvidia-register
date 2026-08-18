@@ -67,7 +67,7 @@ def _parse_count(argv: list[str]) -> int | None:
             try:
                 return int(args[i + 1])
             except ValueError:
-                print(f"Error: {args[i]} requires a number, got: {args[i + 1]}")
+                log.error("Error: %s requires a number, got: %s", args[i], args[i + 1])
                 sys.exit(1)
         i += 1
     return None
@@ -90,13 +90,13 @@ def main_cli() -> None:
         except (ValueError, EOFError):
             count = 1
     if count < 1:
-        print("数量必须 >= 1")
+        log.error("数量必须 >= 1")
         return
 
     try:
         asyncio.run(run(config, count))
     except KeyboardInterrupt:
-        print("\n\nInterrupted. Goodbye!")
+        log.info("Interrupted. Goodbye.")
 
 # ---------------------------------------------------------------------------
 #  注册流程
@@ -109,22 +109,22 @@ def _handle_sigint():
     global _shutdown
     if _shutdown:
         # 第二次 Ctrl+C → 强制退出
-        print("\n\nForce exit!")
+        log.warning("Force exit!")
         sys.exit(1)
     _shutdown = True
-    print("\n\nCtrl+C received. Will exit after current account finishes...")
+    log.warning("Ctrl+C received. Will exit after current account finishes...")
 
 async def run(config: AppConfig, count: int = 1) -> None:
     email_provider = build_email_provider(config)
     captcha_solver = build_captcha_solver(config.captcha)
 
-    print("=" * 60)
-    print("NVIDIA Register + API Key Creator")
-    print("-" * 60)
+    log.info("=" * 60)
+    log.info("NVIDIA Register + API Key Creator")
+    log.info("-" * 60)
     describe_config(config)
-    print(f"  注册数量: {count}")
-    print("=" * 60)
-    print("  (Ctrl+C 优雅退出：完成当前账号后停止)\n")
+    log.info("  注册数量: %s", count)
+    log.info("=" * 60)
+    log.info("  (Ctrl+C 优雅退出：完成当前账号后停止)")
 
     # 注册信号处理（跨平台）
     loop = asyncio.get_running_loop()
@@ -142,9 +142,9 @@ async def run(config: AppConfig, count: int = 1) -> None:
             if _shutdown:
                 break
 
-            print(f"\n{'#' * 60}")
-            print(f"# 账号 {i + 1} / {count}")
-            print(f"{'#' * 60}")
+            log.info("#" * 60)
+            log.info("# 账号 %d / %d", i + 1, count)
+            log.info("#" * 60)
 
             api_key = await _register_one(p, config, email_provider, captcha_solver)
             if api_key:
@@ -154,13 +154,13 @@ async def run(config: AppConfig, count: int = 1) -> None:
 
             # 非最后一个账号时，间隔一下避免频率限制
             if i < count - 1 and not _shutdown:
-                print("\n  等待 5 秒后注册下一个...")
+                log.info("等待 5 秒后注册下一个...")
                 await asyncio.sleep(5)
 
     # 汇总
-    print("\n" + "=" * 60)
-    print(f"完成! 成功: {success_count}, 失败: {fail_count}, 总计: {success_count + fail_count}")
-    print("=" * 60)
+    log.info("=" * 60)
+    log.info("完成! 成功: %d, 失败: %d, 总计: %d", success_count, fail_count, success_count + fail_count)
+    log.info("=" * 60)
 
 async def _launch_browser(p, config: AppConfig):
     """根据 config.browser.engine 启动浏览器。
@@ -221,35 +221,35 @@ async def _register_one(
         try:
             inbox = email_provider.create_inbox(inbox_name)
         except Exception as exc:
-            print(f"  Email creation failed: {exc}")
+            log.error("Email creation failed: %s", exc)
             return None
-        print(f"\n[1] Email: {inbox.address}")
+        log.info("[1] Email: %s", inbox.address)
 
         # 2. 打开 build.nvidia.com，接受 cookie 弹窗
-        print("[2] Opening build.nvidia.com...")
+        log.info("[2] Opening build.nvidia.com...")
         await page.goto("https://build.nvidia.com/", wait_until="domcontentloaded", timeout=90000)
         await _accept_cookie_banner(page)
 
         # 3. 点击 Login 打开登录弹窗
-        print("[3] Open sign-in modal...")
+        log.info("[3] Open sign-in modal...")
         if not await _open_signin_modal(page):
-            print("  Login button not found")
+            log.error("Login button not found")
             await _print_clickable_snapshot(page)
             return None
 
         # 4. 填邮箱 → Next（跳转到 login.nvgs.nvidia.com/v1/create-account）
-        print("[4] Submit email...")
+        log.info("[4] Submit email...")
         start_capturing_sitekey(page)
         await _ensure_hcaptcha_hook(page)
         if not await _submit_email_step(page, inbox.address):
-            print("  Failed at email step")
+            log.error("Failed at email step")
             await _print_clickable_snapshot(page)
             return None
 
         # 5. 注册（填密码 → 过 hCaptcha → 提交 → 验证码）
         ok = await register_account(page, inbox, password, email_provider, captcha_solver, config)
         if not ok:
-            print("\nRegistration failed")
+            log.error("Registration failed")
             return None
 
         # 6. 状态机处理注册后跳转，直到 session 有效并建 key
@@ -263,17 +263,17 @@ async def _register_one(
                 password=password,
                 api_key=api_key,
             )
-            print(f"  Record saved to: {config.nvidia.output_csv}")
-            print(f"\n  ✓ {inbox.address} → {api_key[:30]}...")
+            log.info("Record saved to: %s", config.nvidia.output_csv)
+            log.info("✓ %s → %s...", inbox.address, api_key[:30])
             return api_key
-        print("\nRegistration succeeded but API Key creation failed")
+        log.error("Registration succeeded but API Key creation failed")
         return None
     finally:
         if inbox is not None:
             try:
                 finalize_inbox(email_provider, inbox, success=bool(api_key))
             except Exception as exc:
-                print(f"  outlook group move failed: {exc}")
+                log.error("outlook group move failed: %s", exc)
         await _close_browser(browser, config.browser.close_delay_seconds)
 
 # ---------------------------------------------------------------------------
@@ -286,7 +286,7 @@ async def _accept_cookie_banner(page: Page) -> None:
         btn = page.locator("#onetrust-accept-btn-handler")
         await btn.wait_for(state="visible", timeout=8000)
         await btn.click()
-        print("  cookie accepted")
+        log.debug("cookie accepted")
         await page.locator("div.onetrust-pc-dark-filter").wait_for(state="hidden", timeout=5000)
     except Exception:
         pass
@@ -351,18 +351,18 @@ async def _submit_email_step(page: Page, email: str) -> bool:
         for _ in range(20):
             if await next_btn.is_enabled():
                 await next_btn.click()
-                print("  Next clicked")
+                log.debug("Next clicked")
                 break
             await asyncio.sleep(0.5)
         else:
-            print("  Next stayed disabled")
+            log.warning("Next stayed disabled")
             return False
     except Exception:
         return False
 
     try:
         await page.wait_for_url("**/login.nvgs.nvidia.com/**", timeout=20000)
-        print(f"  navigated to: {page.url[:80]}")
+        log.info("navigated to: %s", page.url[:80])
     except Exception:
         await asyncio.sleep(5)
     return True
@@ -412,17 +412,17 @@ async def _wait_for_password_field(
     """多次检测密码框，每次等待更久；全部失败才返回 False。"""
     for attempt in range(1, attempts + 1):
         wait_seconds = _password_wait_seconds(attempt, base_seconds)
-        print(f"  detecting password field ({attempt}/{attempts}, wait {wait_seconds:.0f}s)...")
+        log.debug("detecting password field (%d/%d, wait %.0fs)...", attempt, attempts, wait_seconds)
         deadline = time_fn() + wait_seconds
         while time_fn() < deadline:
             if await _count_visible_password_inputs(page) > 0:
-                print(f"  password field appeared (attempt {attempt})")
+                log.debug("password field appeared (attempt %d)", attempt)
                 return True
             await sleep_fn(poll_interval)
-        print(f"  password field not found on attempt {attempt}")
+        log.warning("password field not found on attempt %d", attempt)
         if attempt < attempts:
             backoff = min(2.0 * attempt, 6.0)
-            print(f"  backing off {backoff:.0f}s before next detection...")
+            log.debug("backing off %.0fs before next detection...", backoff)
             await sleep_fn(backoff)
     return False
 
@@ -462,14 +462,14 @@ async def register_account(
 ) -> bool:
     """create-account 页：填密码 → 过 hCaptcha → 点 #register_button → 验证码页真实键盘输入。"""
     # [1/4] 等待密码字段并填写（多次检测，等待时间递增）
-    print("\n[1/4] Fill password: " + password)
+    log.info("[1/4] Fill password: %s", password)
     if not await _wait_for_password_field(page):
-        print("  password field never appeared after retries")
+        log.error("password field never appeared after retries")
         await _print_clickable_snapshot(page)
         return False
 
     if not await _fill_visible_password_fields(page, password):
-        print("  failed to fill password field")
+        log.error("failed to fill password field")
         await _print_clickable_snapshot(page)
         return False
     # 保持登录（可选）
@@ -479,7 +479,7 @@ async def register_account(
             await checkbox.check()
     except Exception:
         pass
-    print("  password OK")
+    log.info("password OK")
 
     # [2/4] 过 hCaptcha 并提交。token 被后端拒绝时页面只弹一个笼统的错误提示
     # （表现为“网络问题”），仍停在 create-account 页，所以这里换一个新 token 重试。
@@ -488,38 +488,38 @@ async def register_account(
 
     # [3/4] 等待验证码邮件。同步轮询放到线程里跑，否则会阻塞事件循环，
     # 让 Playwright 在长达 timeout_seconds 的时间内无法处理页面事件。
-    print("\n[3/4] Waiting for verification code email...")
+    log.info("[3/4] Waiting for verification code email...")
     # code = await asyncio.to_thread(
     #     email_provider.poll_verification_code,
     #     inbox,
     #     config.captcha.timeout_seconds,
     # )
     # if not code:
-    #     print("  No verification code received")
+    #     log.warning("No verification code received")
     #     return False
 
     code = await _wait_for_verification_code_email(email_provider, inbox, config.captcha.timeout_seconds)
     if not code:
-        print("  No verification code received")
+        log.error("No verification code received")
         await _print_clickable_snapshot(page)
         return False
 
-    print(f"  Code: {code}")
+    log.info("Code: %s", code)
 
     # 等验证码输入页出现（6 个 number 输入框）
     if not await _wait_for_verification_inputs(page, timeout_seconds=45):
-        print("  verification inputs not detected")
+        log.error("verification inputs not detected")
         await _print_clickable_snapshot(page)
         return False
 
     # [4/4] 真实键盘输入验证码（React 受控组件，JS setValue 无效）
     # 验证码可能过期或输错，检测到错误提示时请求新验证码并重试
-    print("\n[4/4] Type verification code...")
+    log.info("[4/4] Type verification code...")
     for code_attempt in range(1, VERIFICATION_CODE_ATTEMPTS + 1):
         if code_attempt > 1:
-            print(f"\n  请求新验证码... (第 {code_attempt}/{VERIFICATION_CODE_ATTEMPTS} 次)")
+            log.info("请求新验证码... (第 %d/%d 次)", code_attempt, VERIFICATION_CODE_ATTEMPTS)
             if not await _request_new_verification_code(page):
-                print("  无法请求新验证码")
+                log.error("无法请求新验证码")
                 return False
 
             code = await asyncio.to_thread(
@@ -528,12 +528,12 @@ async def register_account(
                 config.captcha.timeout_seconds,
             )
             if not code:
-                print("  未收到新验证码")
+                log.error("未收到新验证码")
                 return False
-            print(f"  新验证码: {code}")
+            log.info("新验证码: %s", code)
 
         if not await _type_verification_code(page, code):
-            print("  failed to type verification code")
+            log.error("failed to type verification code")
             return False
 
         # 点"继续"提交验证码
@@ -542,45 +542,45 @@ async def register_account(
 
         # 检查是否有错误提示（验证码无效）
         if await _has_verification_code_error(page):
-            print("  验证码无效，需要重新请求")
+            log.warning("验证码无效，需要重新请求")
             continue
 
         # 验证码通过后 NVIDIA 会插入"创建通行密钥"引导页，先跳过它
         await _skip_passkey_prompt_if_present(page)
-        print("\nRegistration submitted!")
+        log.info("Registration submitted!")
         return True
 
-    print("  验证码尝试次数已用尽")
+    log.error("验证码尝试次数已用尽")
     return False
 
 async def _wait_for_verification_code_email(
     email_provider, inbox, timeout_seconds=180, initial_poll_delay=3
 ) -> str | None:
-    print("\n[3/4] Waiting for verification code email...")
-    
+    log.info("[3/4] Waiting for verification code email...")
+
     # 初始等待，让邮箱真正到达
     await asyncio.sleep(initial_poll_delay)
-    
+
     deadline = time.time() + timeout_seconds
     for attempt in range(1, 4):
         if time.time() > deadline:
-            print("  等待验证码超时")
+            log.error("等待验证码超时")
             return None
-        
+
         code = await asyncio.to_thread(
             email_provider.poll_verification_code,
             inbox,
             timeout_seconds,
         )
         if code:
-            print(f"  Code: {code}")
+            log.info("Code: %s", code)
             return code
-        
-        print(f"  未收到验证码 (第 {attempt}/3 次轮询)")
-        
+
+        log.info("未收到验证码 (第 %d/3 次轮询)", attempt)
+
         # 每次轮询后等待不同时间（3s / 10s / 15s）
         wait_time = 3 if attempt == 1 else 10 if attempt == 2 else 15
-        print(f"  等待 {wait_time} 秒后重新获取...")
+        log.debug("等待 %d 秒后重新获取...", wait_time)
         await asyncio.sleep(wait_time)
     
     return None
@@ -617,8 +617,8 @@ async def _solve_captcha_and_submit(page: Page, captcha_solver, config: AppConfi
         if attempt > 1:
             log.info("hcaptcha-retry 换新 token 重求解 (第 %s/%s 次，原因=register rejected)",
                      attempt, CAPTCHA_SUBMIT_ATTEMPTS)
-            print(f"\n  [hcaptcha-retry] 重新求解 hCaptcha 并重试提交 "
-                  f"(第 {attempt}/{CAPTCHA_SUBMIT_ATTEMPTS} 次)...")
+            log.info("hcaptcha-retry 重新求解 hCaptcha 并重试提交 (第 %d/%d 次)...",
+                     attempt, CAPTCHA_SUBMIT_ATTEMPTS)
             await _reset_hcaptcha_widget(page)
 
         try:
@@ -626,70 +626,54 @@ async def _solve_captcha_and_submit(page: Page, captcha_solver, config: AppConfi
         except Exception as exc:
             # 打码平台不可用（网络超时、额度耗尽等）只应让当前账号失败
             log.warning("hcaptcha-retry solver error: %s", exc)
-            print(f"  [hcaptcha-retry] Captcha solver error: {exc}")
             solved = False
         if not solved:
             log.warning("hcaptcha-retry solver 返回 False，本轮挑战未拿 token → 进入下一轮（换 token）")
-            print("  [hcaptcha-retry] Captcha 求解失败（solver 返回 False）"
-                  "→ 进入下一轮重来，不会浪费本轮的挑战")
             continue
 
-        print(f"\n[2/4] Submit registration (#register_button)... "
-              f"(attempt {attempt})")
+        log.info("[2/4] Submit registration (#register_button)... (attempt %d)", attempt)
         register_result = await _click_register_and_wait_result(page)
         log.info("register attempt=%s result=%s", attempt, register_result)
 
         if register_result == "accepted":
             log.info("hcaptcha-retry register accepted (attempt %s) — 成功，结束重试", attempt)
-            print(f"  [hcaptcha-retry] register accepted (attempt {attempt}) — 成功，结束重试")
             return True
         if register_result == "email_exists":
             log.warning("hcaptcha-retry email_exists — 邮箱已注册，放弃当前账号，不再换 token")
-            print("  [hcaptcha-retry] 该邮箱已注册 (email_exists) — 放弃当前账号，不再换 token")
             return False
         if register_result == "not_clickable":
             # 按钮不可点与 token 无关（密码/前置校验），换 token 不会改善 → 放弃当前账号。
             log.warning("hcaptcha-retry not_clickable — #register_button 不可点，与 token 无关，放弃当前账号")
-            print("  [hcaptcha-retry] #register_button 不可点 (not_clickable) — 与 token 无关，放弃当前账号")
             return False
         if register_result == "no_response":
             # 45s 没等到 user/register 请求 → 多半是这次点击没真正触发提交（遮罩/防抖/前置校验拦），
             # 与 hCaptcha token 无关。**不换 token**，仅重试点按钮，省一次 Gemini 求解额度。
             log.warning("hcaptcha-retry no_response — 未等到 register 请求，多半点击未触发提交，"
                         "不换 token，仅重试点 #register_button（最多 %s 次）", REGISTER_RECLICK_MAX)
-            print("  [hcaptcha-retry] 注册接口无响应 (no_response) — 与 token 无关，"
-                  f"不换 token，仅重试点 #register_button（最多 {REGISTER_RECLICK_MAX} 次）")
             if await _reclick_register_only(page):
                 # 重试点后接口响应了 → 重新判定本轮提交结果（accepted/keywords/rejected/email_exists）。
                 reroll = await _wait_for_register_response(page)
                 log.info("reclick 后重新判定 register result=%s", reroll)
                 if reroll == "accepted":
                     log.info("hcaptcha-retry reclick 后 register accepted — 成功")
-                    print("  [hcaptcha-retry] 重试点后注册受理 (accepted) — 成功")
                     return True
                 if reroll == "email_exists":
                     log.warning("hcaptcha-retry reclick 后 email_exists — 放弃当前账号")
-                    print("  [hcaptcha-retry] 重试点后该邮箱已注册 (email_exists) — 放弃当前账号")
                     return False
                 # 重试点后仍非 accepted → 若是 rejected 才换 token（真 token 问题），否则放弃。
                 if reroll == "rejected":
                     log.info("hcaptcha-retry reclick 后 rejected — 判为 token 问题，进入下一轮换 token")
-                    print("  [hcaptcha-retry] 重试点后仍未受理 (rejected) — 判为 token 问题，换新 token 重来")
                     continue
                 log.warning("hcaptcha-retry reclick 后 %s — 放弃当前账号", reroll)
-                print(f"  [hcaptcha-retry] 重试点后仍未受理 ({reroll}) — 放弃当前账号")
                 return False
             # 重试点也拿不到响应 → 放弃当前账号，不浪费下一轮 Gemini 求解。
             log.warning("hcaptcha-retry 重试点 %s 次仍无响应 — 放弃当前账号", REGISTER_RECLICK_MAX)
-            print(f"  [hcaptcha-retry] 重试点 {REGISTER_RECLICK_MAX} 次仍无响应 — 放弃当前账号")
             return False
 
         # 到这里只可能是 rejected：接口有响应且非 2xx，真可能是 token 问题 → 换 token 重来。
         log.info("hcaptcha-retry reject=%s — 判为 token 问题，进入下一轮换 token", register_result)
-        print(f"  [hcaptcha-retry] 注册提交被拒 ({register_result}) — 判为 token 问题，换新 token 重来")
 
     log.warning("hcaptcha-retry 连续 %s 次换 token 提交均失败", CAPTCHA_SUBMIT_ATTEMPTS)
-    print(f"  [hcaptcha-retry] 连续 {CAPTCHA_SUBMIT_ATTEMPTS} 次提交均失败")
     await _print_clickable_snapshot(page)
     return False
 
@@ -744,7 +728,7 @@ async def _click_register_and_wait_result(page: Page) -> str:
         else:
             return "not_clickable"
     except Exception as exc:
-        print(f"  #register_button not clickable: {exc}")
+        log.warning("#register_button not clickable: %s", exc)
         return "not_clickable"
 
     # 先挂上等待器再点击，避免响应比监听更快
@@ -753,7 +737,7 @@ async def _click_register_and_wait_result(page: Page) -> str:
         await register_btn.click()
     except Exception as exc:
         response_waiter.cancel()
-        print(f"  #register_button click failed: {exc}")
+        log.warning("#register_button click failed: %s", exc)
         return "not_clickable"
 
     return await response_waiter
@@ -770,7 +754,7 @@ async def _wait_for_register_response(page: Page, timeout_seconds: int = 45) -> 
         return "no_response"
 
     if response.status in (200, 201, 204):
-        print(f"  register accepted ({response.status})")
+        log.info("register accepted (%s)", response.status)
         return "accepted"
 
     body = ""
@@ -778,7 +762,7 @@ async def _wait_for_register_response(page: Page, timeout_seconds: int = 45) -> 
         body = (await response.text())[:300]
     except Exception:
         pass
-    print(f"  register rejected ({response.status}): {body}")
+    log.warning("register rejected (%s): %s", response.status, body)
     if "CONFLICT" in body or "ALREADY" in body.upper():
         return "email_exists"
     return "rejected"
@@ -803,7 +787,7 @@ async def _wait_for_verification_inputs(page: Page, timeout_seconds: int) -> boo
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
         if await page.locator('input[type="number"]').count() >= 6:
-            print("  verification inputs appeared")
+            log.debug("verification inputs appeared")
             return True
         await asyncio.sleep(1)
     return False
@@ -833,7 +817,7 @@ async def _click_continue(page: Page) -> bool:
     """
     clicked = await _click_button_by_names(page, ("继续", "提交", "Continue", "Submit"))
     if clicked:
-        print(f"  clicked [{clicked}]")
+        log.debug("clicked [%s]", clicked)
         return True
     return False
 
@@ -857,7 +841,7 @@ async def _confirm_skip_dialog(page: Page) -> bool:
     for _ in range(10):
         clicked = await _click_button_by_names(page, _CONFIRM_BUTTON_NAMES, timeout_ms=3000)
         if clicked:
-            print(f"  passkey 确认对话框：已点击 [{clicked}]")
+            log.debug("passkey 确认对话框：已点击 [%s]", clicked)
             return True
         await asyncio.sleep(0.5)
     return False
@@ -883,12 +867,12 @@ async def _request_new_verification_code(page: Page) -> bool:
             link = page.get_by_text(text, exact=False).filter(visible=True).first
             if await link.count() > 0:
                 await link.click(timeout=5000)
-                print(f"  已点击 [{text}]")
+                log.info("已点击 [%s]", text)
                 await asyncio.sleep(2)
                 return True
         return False
     except Exception as exc:
-        print(f"  点击请求新验证码失败: {exc}")
+        log.warning("点击请求新验证码失败: %s", exc)
         return False
 
 async def _skip_passkey_prompt(page: Page) -> bool:
@@ -905,7 +889,7 @@ async def _skip_passkey_prompt(page: Page) -> bool:
         skip_btn = page.locator("#cancelSetupSelect_btn")
         if await skip_btn.count() > 0:
             await skip_btn.first.click(timeout=5000)
-            print("  passkey 引导页：已点击 [稍后再说]")
+            log.debug("passkey 引导页：已点击 [稍后再说]")
             await _confirm_skip_dialog(page)
             return True
     except Exception:
@@ -913,11 +897,11 @@ async def _skip_passkey_prompt(page: Page) -> bool:
 
     clicked = await _click_button_by_names(page, ("稍后再说", "Maybe later", "Not now", "Skip"))
     if clicked:
-        print(f"  passkey 引导页：已点击 [{clicked}]")
+        log.debug("passkey 引导页：已点击 [%s]", clicked)
         await _confirm_skip_dialog(page)
         return True
 
-    print("  passkey 引导页：未找到跳过按钮")
+    log.error("passkey 引导页：未找到跳过按钮")
     await _print_clickable_snapshot(page)
     return False
 
@@ -956,7 +940,7 @@ async def _recover_from_navigation_error(page: Page) -> bool:
         await page.goto("https://build.nvidia.com/", wait_until="domcontentloaded", timeout=60000)
         return not page.url.startswith("chrome-error")
     except Exception as exc:
-        print(f"  恢复导航失败: {exc}")
+        log.warning("恢复导航失败: %s", exc)
         return False
 
 async def _ensure_hcaptcha_hook(page: Page) -> None:
@@ -1047,8 +1031,8 @@ async def _print_clickable_snapshot(page: Page) -> None:
             visible: window.getComputedStyle(element).display !== 'none' && element.getClientRects().length > 0
         }))"""
     )
-    print("  clickable snapshot:")
-    print(json.dumps(buttons, ensure_ascii=False, indent=2))
+    log.debug("  clickable snapshot:")
+    log.debug("  %s", json.dumps(buttons, ensure_ascii=False, indent=2))
     try:
         inputs = await page.evaluate(
             r"""() => Array.from(document.querySelectorAll('input')).slice(0, 20).map((element) => ({
@@ -1058,8 +1042,8 @@ async def _print_clickable_snapshot(page: Page) -> None:
                 visible: window.getComputedStyle(element).display !== 'none' && element.getClientRects().length > 0
             }))"""
         )
-        print("  input snapshot:")
-        print(json.dumps(inputs, ensure_ascii=False, indent=2))
+        log.debug("  input snapshot:")
+        log.debug("  %s", json.dumps(inputs, ensure_ascii=False, indent=2))
     except Exception:
         pass
 
@@ -1075,7 +1059,7 @@ async def finalize_and_create_key(page: Page, config: AppConfig) -> str | None:
       → consent 页(点"提交") → select-account(填组织名)
       → complete-profile(session 已有效, 直接建 key)
     """
-    print("\n[阶段C] 处理注册后跳转，直到 session 有效...")
+    log.info("[阶段C] 处理注册后跳转，直到 session 有效...")
     deadline = time.time() + 240
     last_url = ""
 
@@ -1083,17 +1067,17 @@ async def finalize_and_create_key(page: Page, config: AppConfig) -> str | None:
         # 每轮先尝试直接建 key（session 可能已经有效）
         org_name = await _get_org_name(page)
         if org_name:
-            print(f"  session 有效，orgName: {org_name}")
+            log.info("session 有效，orgName: %s", org_name)
             return await _create_key_in_browser(page, org_name, config)
 
         url_now = page.url
         if url_now != last_url:
-            print(f"  当前页面: {url_now[:90]}")
+            log.debug("当前页面: %s", url_now[:90])
             last_url = url_now
 
         # 跳转链中某一跳加载失败会停在 chrome-error 页，只能重新导航把流程接回去
         if url_now.startswith("chrome-error"):
-            print("  页面加载失败，重新打开 build.nvidia.com 以恢复流程...")
+            log.warning("页面加载失败，重新打开 build.nvidia.com 以恢复流程...")
             if not await _recover_from_navigation_error(page):
                 await asyncio.sleep(3)
             last_url = ""
@@ -1111,14 +1095,14 @@ async def finalize_and_create_key(page: Page, config: AppConfig) -> str | None:
 
         # 创建组织页（利用组织名跳过手机验证）
         if "select-account" in url_now or "cloudaccounts.nvidia.com" in url_now:
-            print("  创建组织页：填组织名...")
+            log.info("创建组织页：填组织名...")
             await _create_org(page, config.nvidia.account_name)
             await asyncio.sleep(4)
             continue
 
         # consent 页 → 点提交
         if "consent" in url_now or "static-login.nvidia.com" in url_now:
-            print("  consent 页：点提交...")
+            log.info("consent 页：点提交...")
             await _click_continue(page)
             await asyncio.sleep(3)
             continue
@@ -1126,7 +1110,7 @@ async def finalize_and_create_key(page: Page, config: AppConfig) -> str | None:
         # signin-redirect、complete-profile 等 → 等待跳转
         await asyncio.sleep(2)
 
-    print("  阶段C 超时，未能建 key")
+    log.error("阶段C 超时，未能建 key")
     return None
 
 async def _get_org_name(page: Page) -> str | None:
@@ -1155,7 +1139,7 @@ async def _get_org_name(page: Page) -> str | None:
 
 async def _create_key_in_browser(page: Page, org_name: str, config: AppConfig) -> str | None:
     """在浏览器上下文内 POST 建 key（credentials:include），返回 nvapi-... key。"""
-    print("  POST /keys/type/AI_PLAYGROUNDS_KEY...")
+    log.info("POST /keys/type/AI_PLAYGROUNDS_KEY...")
     payload = {
         "expiryDate": config.nvidia.key_expiry_date,
         "name": config.nvidia.key_name,
@@ -1193,7 +1177,7 @@ async def _create_key_in_browser(page: Page, org_name: str, config: AppConfig) -
 
     status = result.get("status")
     if status not in (200, 201):
-        print(f"  建 key 失败: {status}: {result.get('text') or result.get('error')}")
+        log.error("建 key 失败: %s: %s", status, result.get('text') or result.get('error'))
         return None
 
     data = result.get("data") or {}
@@ -1202,9 +1186,9 @@ async def _create_key_in_browser(page: Page, org_name: str, config: AppConfig) -
         or (data.get("result") or {}).get("apiKey", {}).get("value", "")
     )
     if api_key:
-        print(f"\nAI_PLAYGROUNDS_KEY: {api_key}")
+        log.info("AI_PLAYGROUNDS_KEY: %s", api_key)
         return api_key
-    print("  响应中未找到 apiKey.value")
+    log.error("响应中未找到 apiKey.value")
     return None
 
 async def _create_org(page: Page, org_name: str) -> bool:
@@ -1222,7 +1206,7 @@ async def _create_org(page: Page, org_name: str) -> bool:
         for _ in range(10):
             if await btn.is_enabled():
                 await btn.click()
-                print("  clicked [Create NVIDIA Cloud Account]")
+                log.debug("clicked [Create NVIDIA Cloud Account]")
                 return True
             await asyncio.sleep(0.5)
     except Exception:
@@ -1230,7 +1214,7 @@ async def _create_org(page: Page, org_name: str) -> bool:
     return False
 
 async def _close_browser(browser, delay: int) -> None:
-    print(f"\nBrowser will close in {delay} seconds...")
+    log.info("Browser will close in %s seconds...", delay)
     await asyncio.sleep(delay)
     await browser.close()
 
