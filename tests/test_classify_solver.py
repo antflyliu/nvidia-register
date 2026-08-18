@@ -179,16 +179,16 @@ class ClassifySolverMultiRoundTests(unittest.TestCase):
         solver._refresh_challenge = mock.AsyncMock(return_value=True)  # type: ignore[method-assign]
         solver._inject_hcaptcha_token = mock.AsyncMock(return_value=True)  # type: ignore[method-assign]
         # 模拟 attempt 1 已捕获 challenge.js（_capture_challenge 依赖它判类型）
-        solver._captured_challenge_js = "https://x/challenge/image_label_area_select/challenge.js"
+        solver._captured_challenge_js = ["https://x/challenge/image_label_area_select/challenge.js"]
         with mock.patch.object(captcha_mod, "_is_register_button_enabled",
                                new=mock.AsyncMock(side_effect=[True])):
             ok = asyncio.run(solver.solve(FakePage()))
         self.assertTrue(ok)
         # attempt 1 不 refresh，attempt 2 前 refresh 1 次
         solver._refresh_challenge.assert_awaited_once()
-        # refresh 后不重置 _captured_challenge_js（复用 attempt 1 类型，真机实测
+        # refresh 后不清空 _captured_challenge_js（复用 attempt 1 类型，真机实测
         # refresh 同类型换题不重新加载 challenge.js）
-        self.assertIsNotNone(solver._captured_challenge_js)
+        self.assertTrue(solver._captured_challenge_js)
 
     def test_capture_none_after_refresh_retries(self) -> None:
         """attempt 2+ refresh 后 _capture_challenge 返回 None（类型未知）→ continue 重试，不退出。"""
@@ -304,6 +304,25 @@ class ClassifySolverBuildTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             captcha_mod.build_captcha_solver(cfg)
+
+
+class ResolveUnknownTypeTests(unittest.TestCase):
+    """_resolve_unknown_type：challenge.js 未捕获时用 DOM 信号兜底判类型。"""
+
+    def test_nine_task_images_is_grid(self) -> None:
+        self.assertEqual(captcha_mod._resolve_unknown_type(9, None), "grid")
+        self.assertEqual(captcha_mod._resolve_unknown_type(9, True), "grid")
+        self.assertEqual(captcha_mod._resolve_unknown_type(9, False), "grid")
+
+    def test_has_example_is_point(self) -> None:
+        self.assertEqual(captcha_mod._resolve_unknown_type(0, True), "point")
+
+    def test_no_example_is_drag(self) -> None:
+        self.assertEqual(captcha_mod._resolve_unknown_type(0, False), "drag")
+
+    def test_dom_query_failure_returns_none(self) -> None:
+        # has_example=None（DOM 查询异常）→ 不赌类型，返回 None 由调用方放弃本轮
+        self.assertIsNone(captcha_mod._resolve_unknown_type(0, None))
 
 
 if __name__ == "__main__":

@@ -455,8 +455,34 @@ def _extract_hcaptcha_token(data: dict[str, Any]) -> str | None:
 _CHALLENGE_FRAME_HINT = "newassets.hcaptcha.com"
 _CHALLENGE_VIEW_SEL = ".challenge-view"
 _TASK_IMAGE_SEL = ".task-image"
-# 问句在 .challenge-prompt（纯挑战问句），非 .challenge-header（含报告文字拼接）。
-_QUESTION_SEL = ".challenge-prompt"
+# point 类型在 .examples 内渲染示例图（.challenge-example，display:block），drag 的
+# .examples 为空（display:none）。.challenge-example 存在与否可区分 point/drag
+# （真机 DOM 确认），是 challenge.js 未捕获时的可靠兜底信号。
+_CHALLENGE_EXAMPLE_SEL = ".challenge-example"
+# 问句在 #prompt-question（h2 纯问句）。不用 .challenge-prompt 容器：它含
+# skip 段落 + .examples 示例区，textContent 会混入多余文本；#prompt-question
+# 只含问句本身（真机 DOM 确认，三种类型都有该 id）。
+_QUESTION_SEL = "#prompt-question"
+
+
+def _resolve_unknown_type(n_task_images: int, has_example: bool | None) -> str | None:
+    """challenge.js 未捕获时，用 DOM 信号兜底判类型。
+
+    - n_task_images == 9 → grid（只有九宫格有 9 个 .task-image）
+    - 否则用 .challenge-example 区分 point/drag：point 在 .examples 内渲染示例图
+      （display:block），drag 的 .examples 为空（display:none），存在与否即可区分
+      （真机 DOM 确认）。
+    - has_example 为 None（DOM 查询异常）→ 返回 None，调用方放弃本轮不赌类型。
+    """
+    if n_task_images == 9:
+        return "grid"
+    if has_example is True:
+        return "point"
+    if has_example is False:
+        return "drag"
+    return None
+
+
 # challenge.js 子路径 → captcha_type（实测三种）。
 _CHALLENGE_JS_TYPE_MAP = {
     "image_label_binary": "grid",
@@ -480,6 +506,11 @@ _REFRESH_BUTTON_XPATH = "//div[@class='refresh button']"
 _WAIT_IFRAME_SEC = 60
 _WAIT_RENDER_SEC = 15
 _WAIT_IMAGE_SEC = 15
+# 等 challenge.js 网络事件到达的窗口（秒）。hCaptcha 下发 challenge.js 的速度
+# 随网络/风控变化，过短会采样到 None 误判类型。真机实测多数在 2-3s 内，但
+# 慢下发/缓存命中不发事件时拉长无益——故留 45s 余量覆盖慢下发，配合列表
+# 跨轮次复用兜底缓存不发事件的场景（见 _captured_challenge_js 注释）。
+_WAIT_CHALLENGE_JS_SEC = 45
 # 多轮挑战最大轮数（对齐库 MAX_CRUMB_COUNT 默认 2，留余量覆盖 3 轮 + 失败重试）。
 _MAX_CHALLENGE_ROUNDS = 4
 
@@ -553,8 +584,22 @@ class ClassifySolver:
         # 自动化检测）；camoufox(humanize=True) 浏览器内核已真人化，设 False 直接
         # 点击更快（camoufox 文档建议关自定义贝塞尔）。
         self._humanize = bool(humanize)
-        # 网络监听捕获的 challenge.js URL（点 checkbox 后 hCaptcha 才加载）。
-        self._captured_challenge_js: str | None = None
+        # 网络监听捕获的 challenge.js URL 列表（点 checkbox 后 hCaptcha 才加载）。
+        # 用列表而非单值：retry/refresh 时 challenge.js 可能从缓存加载不重新触发
+        # response 事件（见 _solve_rounds 注释），单值会被 _click_checkbox 清空导致
+        # 后续 retry 拿不到类型。列表跨 checkbox/refresh 保留已捕到的 URL，去重
+        # append 新事件，判类型时逆序取最新已知类型。每账号由 reset_challenge_state
+        # 清空（main.py 在 reset_captcha_state 旁调用），避免跨账号串味。
+        self._captured_challenge_js: list[str] = []
+
+    def reset_challenge_state(self) -> None:
+        """每账号重置 challenge.js 捕获缓存，对齐 reset_captcha_state 的粒度。
+
+        ClassifySolver 实例在 run() 全批共用一个（main.py:119 只 build 一次），
+        故列表会在账号间累积。每个新账号开头调此方法清空，避免账号 A 的类型
+        串到账号 B。retry 间不清空（复用价值），仅跨账号清。
+        """
+        self._captured_challenge_js = []
 
     async def solve(self, page: Page) -> bool:
         """与 LocalSolver.solve 完全相同的接口。"""
@@ -740,15 +785,19 @@ class ClassifySolver:
         返回 True 若挑战 iframe 在 _WAIT_IFRAME_SEC 内出现；否则 False。
         """
         # 挂网络监听捕获 challenge.js（点 checkbox 后才加载）+ hCaptcha 验证 token
-        self._captured_challenge_js = None
+        # 不清空 _captured_challenge_js：列表跨 checkbox/refresh 保留已捕到的 URL，
+        # retry 时复用（cache 命中不发新事件，单值清空会丢类型）。由
+        # reset_challenge_state 每账号清空。
         self._captured_token: str | None = None
 
         async def _on_response(resp):
             url = resp.url or ""
-            # challenge.js（类型识别）
-            if not self._captured_challenge_js:
-                if "/challenge/" in url and url.endswith("/challenge.js"):
-                    self._captured_challenge_js = url
+            # challenge.js（类型识别）：去重 append，列表已有则跳过。
+            # 同 URL 不会重复处理；不同类型 challenge.js（refresh 换类型罕见）
+            # 会作为新元素 append，判类型时逆序优先取最新。
+            if "/challenge/" in url and url.endswith("/challenge.js"):
+                if url not in self._captured_challenge_js:
+                    self._captured_challenge_js.append(url)
 
             # hCaptcha 验证通过 → /getcaptcha/ 或 /checkcaptcha/ 响应 {pass:true,
             # generated_pass_UUID:...}。对齐库 challenger.py:723-734 + 783-788
@@ -977,21 +1026,28 @@ class ClassifySolver:
             await self._dump_hcaptcha_iframes(page)
             return None
 
-        # 1) 等 challenge.js 捕获（最长 10s）
+        # 1) 等 challenge.js 捕获（窗口 _WAIT_CHALLENGE_JS_SEC）
         if not self._captured_challenge_js:
             print("  [classify] waiting challenge.js ...")
-            js_deadline = time.time() + 10
+            js_deadline = time.time() + _WAIT_CHALLENGE_JS_SEC
             while time.time() < js_deadline and not self._captured_challenge_js:
                 await asyncio.sleep(0.3)
             print(f"  [classify] challenge.js = {self._captured_challenge_js!r}")
 
-        # 2) 判类型
+        # 2) 判类型：逆序遍历已捕获的 challenge.js URL，取最新能映射出已知类型的。
+        # 列表按捕获顺序 append，最新的在末尾，逆序优先用当前挑战对应的类型。
+        # 同类型换题时列表元素类型一致，逆序取首即命中；换类型罕见，逆序保证取到
+        # 最新一次下发的类型而非历史残留。
         detected_type = "unknown"
         challenge_js_type = None
-        if self._captured_challenge_js:
-            tail = self._captured_challenge_js.split("/challenge/")[-1]
-            challenge_js_type = tail.rsplit("/challenge.js", 1)[0]
-            detected_type = _CHALLENGE_JS_TYPE_MAP.get(challenge_js_type, "unknown")
+        for js_url in reversed(self._captured_challenge_js):
+            tail = js_url.split("/challenge/")[-1]
+            js_type = tail.rsplit("/challenge.js", 1)[0]
+            mapped = _CHALLENGE_JS_TYPE_MAP.get(js_type)
+            if mapped:
+                detected_type = mapped
+                challenge_js_type = js_type
+                break
         # DOM 兜底（注：真机实测 challenge.js 在父页面加载，challenge iframe
         # 内无 <script src*=challenge> 标签，此查询永远返回 null——此分支实际
         # 不生效，类型识别完全依赖上面的 _on_response 网络监听。保留作防御。）
@@ -1052,16 +1108,22 @@ class ClassifySolver:
         # 5) task-image 数量 + unknown 兜底
         n_task_images = await fr.eval_on_selector_all(_TASK_IMAGE_SEL, "els => els.length") or 0
         if detected_type == "unknown":
-            if n_task_images == 9:
-                # 九宫格：只有 grid 有 9 个 .task-image，可安全兜底
-                detected_type = "grid"
-            else:
-                # point/drag 的 task_images 都是 0（point 在整图 canvas 上点，drag
-                # 拖 canvas 内元素），n_task_images 无法区分二者。challenge.js 是
-                # 区分 point/drag 的唯一可靠信号——若 challenge.js 与 DOM 兜底都
-                # 没拿到类型，硬猜 drag 会把 point 误判成 drag（真机实测：attempt 2
-                # refresh 后 challenge.js=None → 误判 drag → 拖拽失败）。此时
-                # 报错退出，由 _solve_rounds refresh 换题重试，不赌类型。
+            # point/drag 的 task_images 都是 0（point 在整图 canvas 上点，drag
+            # 拖 canvas 内元素），n_task_images 无法区分二者。用 .challenge-example
+            # 兜底：point 在 .examples 内渲染示例图（display:block），drag 的
+            # .examples 为空（display:none），存在与否即可区分（真机 DOM 确认）。
+            try:
+                has_example = await fr.eval_on_selector_all(
+                    _CHALLENGE_EXAMPLE_SEL, "els => els.length > 0"
+                )
+            except Exception:
+                has_example = None
+            detected_type = _resolve_unknown_type(n_task_images, has_example)
+            if detected_type is None:
+                # DOM 查询本身失败（异常）才放弃，避免把 point 误判成 drag
+                # （真机实测：attempt 2 refresh 后 challenge.js=None → 误判
+                # drag → 拖拽失败）。此时报错退出，由 _solve_rounds refresh
+                # 换题重试，不赌类型。
                 print("  [classify] type unknown (challenge.js not captured, "
                       "DOM fallback failed) — refuse to guess, abort capture")
                 return None
@@ -1351,3 +1413,4 @@ def build_captcha_solver(config: CaptchaConfig) -> CaptchaSolver:
             fallback_local=config.classify_fallback_local,
         )
     raise ValueError(f"Unsupported captcha mode: {config.mode}")
+
